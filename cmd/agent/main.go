@@ -48,7 +48,31 @@ type Agent struct {
 	dataDir        string
 	currentVersion string
 	currentRealm   *config.RealmBlock // 最近一次下发的 realm 块（供 §7.9 探测 server_url）
+	realmActive    bool               // 是否已用 manager 下发/缓存的 realm 配置生成过 sing-box 配置
 	mu             sync.RWMutex
+}
+
+// isRealmActive 线程安全读取 realm 是否已生效（供 health 端点）。
+func (a *Agent) isRealmActive() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.realmActive
+}
+
+// logDegraded 打一条醒目的降级提示，说清"为什么 realm 没生效"，
+// 避免运维从一堆 522 / grpc deadline 报错里自己推断（manager 不通时的体验改进）。
+func (a *Agent) logDegraded(reason string) {
+	log.Printf("================ REALM NOT ACTIVE (degraded) ================")
+	log.Printf("  reason : %s", reason)
+	log.Printf("  effect : sing-box is running an EMPTY config — no hy2/realm inbound,")
+	log.Printf("           no v2ray_api. Expect 'grpc deadline' (stats) and nothing on")
+	log.Printf("           the hy2 port until a realm config is applied.")
+	log.Printf("  why    : realm_token/stun/sni/dns MUST be pushed by manager (design §4.1);")
+	log.Printf("           install.sh deliberately does not carry them, so the agent cannot")
+	log.Printf("           bootstrap a realm inbound on its own without a prior good sync.")
+	log.Printf("  action : bring otun-manager online and ensure it serves this realm egress")
+	log.Printf("           (node_kind=realm) via /api/node/users. Agent keeps retrying.")
+	log.Printf("=============================================================")
 }
 
 func main() {
@@ -150,17 +174,23 @@ func (a *Agent) Run(ctx context.Context) {
 
 	// 注册（不靠 IP，靠 node_id+api_key，§5.1）。
 	if err := a.syncer.Register(a.cfg.NodeID, a.cfg.RealmID, a.cfg.Region, a.cfg.HY2Port); err != nil {
-		log.Printf("Node registration failed: %v", err)
+		log.Printf("Node registration failed: %v (will keep retrying via heartbeat/sync)", err)
 	}
 
 	// 首次同步：拉 users + realm + dns 块并生成配置。
 	if err := a.syncAndApply(); err != nil {
 		log.Printf("Initial sync failed: %v", err)
 		if a.cache.HasCache() {
-			log.Println("Using cached configuration...")
+			log.Println("Using cached configuration from a previous successful sync...")
 			if err := a.applyFromCache(); err != nil {
 				log.Printf("Failed to apply cache: %v", err)
+				a.logDegraded("manager unreachable and cached config could not be applied")
 			}
+		} else {
+			// 全新装 + manager 从没通过：没有 realm_token/stun（§4.1 锁定为必须下发，
+			// install.sh 故意不带），无法凭空兜底起 realm inbound。只能明确提示，不让运维
+			// 从一堆 522/grpc 报错里自己推断。
+			a.logDegraded("manager unreachable on first start and no cached config exists")
 		}
 	}
 
@@ -182,9 +212,12 @@ func (a *Agent) Run(ctx context.Context) {
 
 func (a *Agent) startHTTPServer() {
 	mux := http.NewServeMux()
-	healthServer := api.NewHealthServer(func() bool {
-		return a.manager.IsRunning() || os.Getenv("SKIP_SINGBOX") == "true"
-	})
+	healthServer := api.NewHealthServer(
+		func() bool {
+			return a.manager.IsRunning() || os.Getenv("SKIP_SINGBOX") == "true"
+		},
+		a.isRealmActive,
+	)
 	mux.HandleFunc("/health", healthServer.HandleHealth)
 	mux.HandleFunc("/ready", healthServer.HandleReady)
 
@@ -306,7 +339,17 @@ func (a *Agent) syncAndApply() error {
 	a.mu.Lock()
 	a.currentVersion = resp.Version
 	a.currentRealm = resp.Realm
+	wasActive := a.realmActive
+	a.realmActive = resp.Realm != nil // 只有 manager 真下发了 realm 块才算 realm 生效
+	nowActive := a.realmActive
 	a.mu.Unlock()
+
+	if nowActive && !wasActive {
+		log.Printf("REALM ACTIVE: applied realm config from manager (realm_id=%s)", resp.Realm.RealmID)
+	} else if !nowActive {
+		// 拉到了 users 但 manager 没带 realm 块——多半是 manager 还没做 realm 对接（§13）。
+		a.logDegraded("manager responded but did not include a realm block (realm integration not deployed yet?)")
+	}
 
 	if a.manager.IsRunning() {
 		log.Println("Config version changed, reloading sing-box (drops connections, §7.0)...")
@@ -325,7 +368,12 @@ func (a *Agent) applyFromCache() error {
 
 	a.mu.Lock()
 	a.currentRealm = resp.Realm
+	a.realmActive = resp.Realm != nil
 	a.mu.Unlock()
+
+	if resp.Realm != nil {
+		log.Printf("REALM ACTIVE (from cache): realm_id=%s", resp.Realm.RealmID)
+	}
 
 	singboxCfg := a.generator.Generate(resp.Users, resp.Realm, resp.DNS)
 	return a.generator.WriteToFile(singboxCfg, a.cfg.SingboxConfig)
