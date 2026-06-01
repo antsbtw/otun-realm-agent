@@ -48,13 +48,14 @@ jobs:
         run: |
           git clone --depth 1 --branch "v${{ env.SINGBOX_VERSION }}" https://github.com/SagerNet/sing-box.git sing-box-src
 
-      - name: Build sing-box (realm default + v2ray_api)
+      - name: Build sing-box (realm default + v2ray_api + clash_api)
         run: |
           cd sing-box-src
           # realm 在 1.14 默认编入（无需 tag）；with_v2ray_api 提供 per-user 计费；
+          # with_clash_api 提供踢人/连接采集（generator 配置里用了 clash_api）；
           # with_quic 提供 hysteria2；with_utls 兼容。
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -tags "with_v2ray_api,with_quic,with_utls" \
+            go build -tags "with_v2ray_api,with_clash_api,with_quic,with_utls" \
             -ldflags "-s -w" \
             -o ../sing-box-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/sing-box

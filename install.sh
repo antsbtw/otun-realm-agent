@@ -105,7 +105,7 @@ if ! curl -fsSL "$SINGBOX_URL" -o /usr/local/bin/sing-box; then
     cd /tmp && rm -rf sing-box-src
     git clone --depth 1 --branch "v${SINGBOX_VERSION}" https://github.com/SagerNet/sing-box.git sing-box-src
     cd sing-box-src
-    go build -tags "with_v2ray_api,with_quic,with_utls" -o /usr/local/bin/sing-box ./cmd/sing-box
+    go build -tags "with_v2ray_api,with_clash_api,with_quic,with_utls" -o /usr/local/bin/sing-box ./cmd/sing-box
     cd /tmp && rm -rf sing-box-src
 fi
 cd "$INSTALL_DIR"
