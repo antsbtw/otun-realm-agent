@@ -17,10 +17,27 @@ func genJSON(t *testing.T, users []User, realm *RealmBlock, dns *DNSBlock) strin
 	return string(data)
 }
 
-func TestGenerator_NoDetourInDNS_Pitfall1(t *testing.T) {
+func TestGenerator_NoDNSSection(t *testing.T) {
+	// 对齐 PoC + 规避 sing-box 1.14 DNS 迁移：agent 不生成 dns 段（即便 manager 下发了 dns 块）。
+	// 经官方 1.14.0-alpha.25 `check` 核实：含 realm、无 dns 段的配置返回 0。
 	out := genJSON(t, nil, nil, &DNSBlock{Country: "CN", Servers: []string{"223.5.5.5"}})
-	if strings.Contains(out, "detour") {
-		t.Errorf("DNS段不得出现 detour (坑#1); got: %s", out)
+	if strings.Contains(out, "\"dns\"") {
+		t.Errorf("不应生成 dns 段（对齐 PoC，避免 1.14 旧 DNS 格式报错）; got: %s", out)
+	}
+	if strings.Contains(out, "223.5.5.5") {
+		t.Errorf("下发的 dns servers 不应进入配置; got: %s", out)
+	}
+}
+
+func TestGenerator_BillingExperimental(t *testing.T) {
+	// 照搬 node-agent 计费方案：必须生成 v2ray_api（per-user 精确计量）+ clash_api（踢人/采集）。
+	// 守护这一不变量：防止 v2ray_api 被误删（误删则与 node-agent 计费不一致）。
+	out := genJSON(t, []User{{UUID: "u-1", Enabled: true}}, nil, nil)
+	if !strings.Contains(out, "v2ray_api") {
+		t.Errorf("应生成 v2ray_api（per-user 精确计费，对齐 node-agent）; got: %s", out)
+	}
+	if !strings.Contains(out, "clash_api") {
+		t.Errorf("应生成 clash_api（踢人/连接采集）; got: %s", out)
 	}
 }
 
@@ -67,12 +84,5 @@ func TestGenerator_DisabledUserExcluded(t *testing.T) {
 	out := genJSON(t, users, nil, nil)
 	if strings.Contains(out, "off") {
 		t.Errorf("禁用用户不应出现在配置中; got: %s", out)
-	}
-}
-
-func TestGenerator_StrategyIPv4Only(t *testing.T) {
-	out := genJSON(t, nil, nil, &DNSBlock{Servers: []string{"8.8.8.8", "1.1.1.1"}})
-	if !strings.Contains(out, "ipv4_only") {
-		t.Errorf("DNS strategy 应为 ipv4_only (规避 409 realm_taken)")
 	}
 }

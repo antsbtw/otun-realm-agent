@@ -86,24 +86,18 @@ case $ARCH in
     *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
 esac
 
-# ============ sing-box（★必须带 realm 打洞支持）============
-# realm 是 sing-box 较新版本（1.14.0-alpha 起）默认编入的功能；旧版/普通构建会报
-# "inbounds[0].realm: json: unknown field \"realm\""。经真机核实：SagerNet 官方
-# v1.14.0-alpha.25 的预编译包即带 realm（默认编入，无需特殊 tag），`sing-box check`
-# 对含 realm 块的配置返回 0。故 realm-agent【固定用官方 alpha.25】，不复用 node-agent
-# 的普通 sing-box（那个无 realm）。官方包是 .tar.gz，内含二进制。
-echo -e "${GREEN}Downloading sing-box (with realm punching support)...${NC}"
+# ============ sing-box（★带 realm 打洞 + v2ray_api 计费，自编译预发布）============
+# 照搬 otun-node-agent 的方案：realm-agent 自己用 build-singbox 工作流编译
+# “1.14.0-alpha.25 源码（realm 默认）+ with_v2ray_api（per-user 计费）+ with_quic（hy2）”，
+# 发布到 realm-agent 自己的 release（tag singbox-v<版本>，资产为裸二进制）。
+# 不复用 node-agent 的二进制（那个版本旧、无 realm）；也不用官方预编译包（那个无 v2ray_api）。
+echo -e "${GREEN}Downloading sing-box (realm + v2ray_api)...${NC}"
 SINGBOX_VERSION="1.14.0-alpha.25"
-SINGBOX_PKG="sing-box-${SINGBOX_VERSION}-linux-${SINGBOX_ARCH}"
-SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${SINGBOX_PKG}.tar.gz"
-cd /tmp && rm -rf "$SINGBOX_PKG" sing-box.tar.gz
-if curl -fsSL "$SINGBOX_URL" -o sing-box.tar.gz && tar xzf sing-box.tar.gz; then
-    mv "${SINGBOX_PKG}/sing-box" /usr/local/bin/sing-box
-    rm -rf "$SINGBOX_PKG" sing-box.tar.gz
-else
-    echo -e "${YELLOW}Pre-built download failed, building from source (realm is default in this version)...${NC}"
+SINGBOX_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/singbox-v${SINGBOX_VERSION}/sing-box-linux-${SINGBOX_ARCH}"
+if ! curl -fsSL "$SINGBOX_URL" -o /usr/local/bin/sing-box; then
+    echo -e "${YELLOW}Pre-built download failed, building from source...${NC}"
     apt-get install -y -qq git
-    GO_VERSION="1.23.4"
+    GO_VERSION="1.25.0"
     rm -rf /usr/local/go
     curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${AGENT_ARCH}.tar.gz" -o /tmp/go.tar.gz
     tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
@@ -111,7 +105,7 @@ else
     cd /tmp && rm -rf sing-box-src
     git clone --depth 1 --branch "v${SINGBOX_VERSION}" https://github.com/SagerNet/sing-box.git sing-box-src
     cd sing-box-src
-    go build -tags "with_quic" -o /usr/local/bin/sing-box ./cmd/sing-box
+    go build -tags "with_v2ray_api,with_quic,with_utls" -o /usr/local/bin/sing-box ./cmd/sing-box
     cd /tmp && rm -rf sing-box-src
 fi
 cd "$INSTALL_DIR"

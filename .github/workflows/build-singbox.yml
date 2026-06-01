@@ -1,0 +1,103 @@
+name: Build sing-box (realm)
+
+# 照搬 otun-node-agent 的 build-singbox 工作流，编译【带 realm 打洞 + v2ray_api 计费】的
+# sing-box，发布到 realm-agent 自己的 release。realm-agent 的 install.sh 从这里拉。
+#
+# 为什么要自编译：
+#   - realm 打洞是 sing-box 1.14.0-alpha.x 默认编入的功能（官方预编译包就带）；
+#   - 但官方预编译包【不含 with_v2ray_api】，而 per-user 精确计费（照搬 node-agent）需要它；
+#   - 所以用 1.14 源码 + with_v2ray_api 自编译 → 同时拥有 realm 与 v2ray_api。
+#   与已上线 otun-node-agent 的计费方案保持一致，不降级。
+
+on:
+  workflow_dispatch:
+    inputs:
+      singbox_version:
+        description: 'sing-box version (realm 需 1.14.0-alpha.x)'
+        required: true
+        default: '1.14.0-alpha.25'
+
+permissions:
+  contents: write
+
+env:
+  SINGBOX_VERSION: ${{ github.event.inputs.singbox_version || '1.14.0-alpha.25' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # sing-box 1.14.0-alpha.25 官方包用 go1.25 构建；与之对齐避免源码不兼容。
+          go-version: '1.25'
+
+      - name: Clone sing-box source
+        run: |
+          git clone --depth 1 --branch "v${{ env.SINGBOX_VERSION }}" https://github.com/SagerNet/sing-box.git sing-box-src
+
+      - name: Build sing-box (realm default + v2ray_api)
+        run: |
+          cd sing-box-src
+          # realm 在 1.14 默认编入（无需 tag）；with_v2ray_api 提供 per-user 计费；
+          # with_quic 提供 hysteria2；with_utls 兼容。
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -tags "with_v2ray_api,with_quic,with_utls" \
+            -ldflags "-s -w" \
+            -o ../sing-box-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/sing-box
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -name 'sing-box-*' -exec mv {} release/ \;
+          chmod +x release/*
+          ls -la release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: singbox-v${{ env.SINGBOX_VERSION }}
+          name: sing-box v${{ env.SINGBOX_VERSION }} (realm + v2ray_api)
+          body: |
+            Pre-built sing-box for otun-realm-agent — realm punching + per-user billing.
+            - realm hole-punching (default in 1.14.0-alpha.x source)
+            - `with_v2ray_api`: per-user traffic statistics (same as otun-node-agent)
+            - `with_quic`: hysteria2 inbound
+            - `with_utls`
+
+            Downloaded automatically by the realm-agent install script.
+          files: release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

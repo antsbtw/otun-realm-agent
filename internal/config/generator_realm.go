@@ -98,16 +98,26 @@ func (g *RealmGenerator) Generate(users []User, realm *RealmBlock, dns *DNSBlock
 		inbound["realm"] = realmBlock
 	}
 
+	// 不生成 dns 段：对齐 PoC 已验证配置（PoC 无 dns 段，realm 出口 direct 出站用系统 DNS
+	// 即可），同时规避 sing-box 1.14 移除旧 DNS server 格式 + 要求 domain_resolver 的兼容问题。
+	// manager 仍可下发 dns 块（数据层保留），但 agent 本期不渲染——经官方 1.14.0-alpha.25
+	// `check` 核实：含 realm 块、无 dns 段的配置返回 0。
+	// 不生成 dns 段：对齐 PoC 已验证配置（PoC 无 dns 段，realm 出口 direct 出站用系统 DNS
+	// 即可），同时规避 sing-box 1.14 移除旧 DNS server 格式 + 要求 domain_resolver 的兼容问题。
+	// manager 仍可下发 dns 块（数据层保留），但 agent 本期不渲染。
+	_ = dns
 	config := map[string]any{
 		"log": map[string]any{
 			"level":     "info",
 			"timestamp": true,
 		},
-		"dns":       buildDNS(dns),
 		"inbounds":  []map[string]any{inbound},
-		"outbounds": []map[string]any{{"type": "direct", "tag": "direct"}},
+		"outbounds": []map[string]any{{"type": "direct", "tag": "direct-out"}},
 		"experimental": map[string]any{
-			// per-user 计量（§7.6 复用 collector）。
+			// per-user 精确计量（§7.6）。★照搬 otun-node-agent 的计费方案：v2ray_api gRPC
+			// 拿 per-user 累计字节。这要求 sing-box 带 with_v2ray_api —— 由 realm-agent 自己的
+			// build-singbox 工作流编译（1.14.0-alpha.25 源码 + with_v2ray_api/with_quic 等 tag，
+			// realm 默认编入），install.sh 从 realm-agent release 拉。与已上线 node-agent 计费一致。
 			"v2ray_api": map[string]any{
 				"listen": V2RayAPIAddr,
 				"stats": map[string]any{
@@ -124,38 +134,6 @@ func (g *RealmGenerator) Generate(users []User, realm *RealmBlock, dns *DNSBlock
 	}
 
 	return config
-}
-
-// buildDNS 渲染 DNS 段（§7.1.4）。agent 不判断国家、不硬编码 223.5.5.5——只渲染下发的 server 列表。
-// 坑#1：DNS server 对象里【禁止出现 detour 键】；且对下发字段做白名单（只接受 address），防 manager 误配。
-func buildDNS(dns *DNSBlock) map[string]any {
-	// 未下发时给一个最小可启动的占位（注册前/离线兜底）；
-	// 国家级 DNS 一旦下发即覆盖（§4.2）。
-	servers := []string{"1.1.1.1"}
-	if dns != nil && len(dns.Servers) > 0 {
-		servers = dns.Servers
-	}
-
-	dnsServers := make([]map[string]any, 0, len(servers)+1)
-	// 第一个作 proxy-dns，其余作 direct-dns；都【不写 detour】（坑#1）。
-	dnsServers = append(dnsServers, map[string]any{
-		"tag":     "proxy-dns",
-		"address": servers[0],
-	})
-	directAddr := servers[0]
-	if len(servers) > 1 {
-		directAddr = servers[1]
-	}
-	dnsServers = append(dnsServers, map[string]any{
-		"tag":     "direct-dns",
-		"address": directAddr,
-	})
-
-	return map[string]any{
-		"servers":  dnsServers,
-		"final":    "proxy-dns",
-		"strategy": "ipv4_only", // 配合单地址族，规避 409 realm_taken
-	}
 }
 
 // WriteToFile 将配置写入文件。
