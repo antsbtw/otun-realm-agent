@@ -24,19 +24,21 @@ func TestGenerator_NoDetourInDNS_Pitfall1(t *testing.T) {
 	}
 }
 
-func TestGenerator_StunIPv4Only_Pitfall2(t *testing.T) {
+func TestGenerator_StunServersPassthrough(t *testing.T) {
+	// 真机核实（PoC + 官方 sing-box 1.14.0-alpha.25 `check` 通过）：域名 STUN 可用。
+	// 故 STUN 原样下发，不过滤——含域名与 IP 都应原样出现在配置中。
 	realm := &RealmBlock{
 		RealmID:     "iptv-cn-sh",
 		ServerURL:   "https://situstechnologies.com/realm",
 		Token:       "tok",
-		StunServers: []string{"74.125.250.129:19302", "[2001:db8::1]:3478"}, // 一个 v4 一个 v6
+		StunServers: []string{"stun.l.google.com:19302", "74.125.250.129:19302"}, // 域名 + IP
 	}
 	out := genJSON(t, nil, realm, nil)
-	if strings.Contains(out, "2001:db8") {
-		t.Errorf("IPv6 STUN 应被过滤 (坑#2 + 规避 409 realm_taken); got: %s", out)
+	if !strings.Contains(out, "stun.l.google.com:19302") {
+		t.Errorf("域名 STUN 应原样下发（真机已验证可用）; got: %s", out)
 	}
-	if !strings.Contains(out, "74.125.250.129") {
-		t.Errorf("IPv4 STUN 应保留")
+	if !strings.Contains(out, "74.125.250.129:19302") {
+		t.Errorf("IP STUN 应保留")
 	}
 }
 

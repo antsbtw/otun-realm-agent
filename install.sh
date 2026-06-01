@@ -86,13 +86,22 @@ case $ARCH in
     *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
 esac
 
-# ============ sing-box（需 with_v2ray_api,with_utls,with_quic）============
-echo -e "${GREEN}Downloading pre-built sing-box...${NC}"
-SINGBOX_VERSION="1.10.7"
-# 复用现成分发链：与 otun-node-agent 同一 release 通道（§5：非新需求）。
-SINGBOX_URL="https://github.com/antsbtw/otun-node-agent/releases/download/v${SINGBOX_VERSION}/sing-box-linux-${SINGBOX_ARCH}"
-if ! curl -fsSL "$SINGBOX_URL" -o /usr/local/bin/sing-box; then
-    echo -e "${YELLOW}Pre-built download failed, building from source...${NC}"
+# ============ sing-box（★必须带 realm 打洞支持）============
+# realm 是 sing-box 较新版本（1.14.0-alpha 起）默认编入的功能；旧版/普通构建会报
+# "inbounds[0].realm: json: unknown field \"realm\""。经真机核实：SagerNet 官方
+# v1.14.0-alpha.25 的预编译包即带 realm（默认编入，无需特殊 tag），`sing-box check`
+# 对含 realm 块的配置返回 0。故 realm-agent【固定用官方 alpha.25】，不复用 node-agent
+# 的普通 sing-box（那个无 realm）。官方包是 .tar.gz，内含二进制。
+echo -e "${GREEN}Downloading sing-box (with realm punching support)...${NC}"
+SINGBOX_VERSION="1.14.0-alpha.25"
+SINGBOX_PKG="sing-box-${SINGBOX_VERSION}-linux-${SINGBOX_ARCH}"
+SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${SINGBOX_PKG}.tar.gz"
+cd /tmp && rm -rf "$SINGBOX_PKG" sing-box.tar.gz
+if curl -fsSL "$SINGBOX_URL" -o sing-box.tar.gz && tar xzf sing-box.tar.gz; then
+    mv "${SINGBOX_PKG}/sing-box" /usr/local/bin/sing-box
+    rm -rf "$SINGBOX_PKG" sing-box.tar.gz
+else
+    echo -e "${YELLOW}Pre-built download failed, building from source (realm is default in this version)...${NC}"
     apt-get install -y -qq git
     GO_VERSION="1.23.4"
     rm -rf /usr/local/go
@@ -102,9 +111,10 @@ if ! curl -fsSL "$SINGBOX_URL" -o /usr/local/bin/sing-box; then
     cd /tmp && rm -rf sing-box-src
     git clone --depth 1 --branch "v${SINGBOX_VERSION}" https://github.com/SagerNet/sing-box.git sing-box-src
     cd sing-box-src
-    go build -tags "with_v2ray_api,with_utls,with_quic" -o /usr/local/bin/sing-box ./cmd/sing-box
+    go build -tags "with_quic" -o /usr/local/bin/sing-box ./cmd/sing-box
     cd /tmp && rm -rf sing-box-src
 fi
+cd "$INSTALL_DIR"
 chmod +x /usr/local/bin/sing-box
 setcap cap_net_bind_service=+ep /usr/local/bin/sing-box 2>/dev/null || true
 if ! sing-box version > /dev/null 2>&1; then

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 )
 
 // 本地 sing-box API 地址（照搬 node-agent 约定）。
@@ -88,9 +87,12 @@ func (g *RealmGenerator) Generate(users []User, realm *RealmBlock, dns *DNSBlock
 			"realm_id":   realm.RealmID,
 			"token":      realm.Token,
 		}
-		// 坑#2：stun_servers 必须 IP 不能域名；只列 IPv4 STUN，规避同 realm_id 双栈 → 409 realm_taken。
+		// stun_servers 原样下发。
+		// 注：设计 §4 曾标"坑#2 必须 IP 不能域名"，但真机核实（PoC + 官方 sing-box
+		// 1.14.0-alpha.25 `check` 通过）证明【域名 STUN 可用】（如 stun.l.google.com:19302）。
+		// 故不再过滤域名——以 manager 下发为准，由出口表 stun_servers 决定。
 		if len(realm.StunServers) > 0 {
-			realmBlock["stun_servers"] = filterIPv4Stun(realm.StunServers)
+			realmBlock["stun_servers"] = realm.StunServers
 		}
 		// 坑#3：realm 块内【不要】写 http_client.detour —— 这里本就不附加。
 		inbound["realm"] = realmBlock
@@ -154,26 +156,6 @@ func buildDNS(dns *DNSBlock) map[string]any {
 		"final":    "proxy-dns",
 		"strategy": "ipv4_only", // 配合单地址族，规避 409 realm_taken
 	}
-}
-
-// filterIPv4Stun 仅保留 IPv4 STUN（坑#2 + 规避双栈 409 realm_taken）。
-// 判定：含 '.' 且不含 '['（IPv6 字面量用 [::]:port 形式）。
-func filterIPv4Stun(stun []string) []string {
-	out := make([]string, 0, len(stun))
-	for _, s := range stun {
-		if len(s) == 0 {
-			continue
-		}
-		// IPv4 STUN：含 '.' 且不含 '['（IPv6 字面量用 [::]:port 形式）。
-		if strings.Contains(s, ".") && !strings.Contains(s, "[") {
-			out = append(out, s)
-		}
-	}
-	if len(out) == 0 {
-		// 全被过滤掉则原样返回，避免空 stun 导致无法注册（让 sing-box check 暴露问题）。
-		return stun
-	}
-	return out
 }
 
 // WriteToFile 将配置写入文件。
