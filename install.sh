@@ -40,7 +40,7 @@ apt-get install -y -qq curl
 # 身份 + 首启引导最小集；realm_token/stun/obfs/sni/dns 由 manager 下发，故意不带（§4.1 动态可调）。
 NODE_API_KEY=""
 NODE_ID="realm-$(hostname)"
-API_URL="https://otun-manager.situstechnologies.com"
+API_URL="https://otun-manager-v3.situstechnologies.com"
 HY2_PORT=51820
 REALM_ID=""
 REALM_SERVER_URL="https://situstechnologies.com/realm"

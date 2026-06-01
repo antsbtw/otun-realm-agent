@@ -16,7 +16,7 @@ import (
 //	并固定 MANAGEMENT_MODE=remote（realm-agent 无本地/混合模式）。
 func LoadFromEnv() *AgentConfig {
 	return &AgentConfig{
-		APIURL:        getEnv("OTUN_API_URL", "https://otun-manager.situstechnologies.com"),
+		APIURL:        getEnv("OTUN_API_URL", "https://otun-manager-v3.situstechnologies.com"),
 		NodeAPIKey:    getEnv("NODE_API_KEY", ""),
 		NodeID:        getEnv("NODE_ID", "realm-default"),
 		SyncInterval:  getDurationEnv("SYNC_INTERVAL", 60) * time.Second,

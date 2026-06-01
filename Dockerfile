@@ -33,7 +33,7 @@ WORKDIR /app
 RUN mkdir -p /app/data /etc/sing-box
 COPY --from=builder /agent /app/agent
 
-ENV OTUN_API_URL=https://otun-manager.situstechnologies.com \
+ENV OTUN_API_URL=https://otun-manager-v3.situstechnologies.com \
     NODE_API_KEY="" \
     NODE_ID="realm-default" \
     MANAGEMENT_MODE=remote \
