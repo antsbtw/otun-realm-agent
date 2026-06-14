@@ -13,15 +13,24 @@ on:
   workflow_dispatch:
     inputs:
       singbox_version:
-        description: 'sing-box version (realm 需 1.14.0-alpha.x)'
+        description: 'sing-box base version (realm 需 1.14.0-alpha.x；仅用于 release tag 标注)'
         required: true
         default: '1.14.0-alpha.25'
+      fork_branch:
+        description: 'antsbtw/sing-box fork 分支（含 WP-1 热更 patch）'
+        required: true
+        default: 'realm-hot-reload'
 
 permissions:
   contents: write
 
+# WP-3：sing-box 源从官方上游切到 antsbtw/sing-box fork（含 WP-1 hy2 运行时热更端点 + 并发安全）。
+# 官方上游不含 hot_reload 块 → 编出的二进制会让 generator 的 hot_reload 配置 check 失败、
+# agent 调热更端点全 404/拒绝。必须用 fork。tag/产物名/release 流程不变。
 env:
   SINGBOX_VERSION: ${{ github.event.inputs.singbox_version || '1.14.0-alpha.25' }}
+  FORK_REPO: https://github.com/antsbtw/sing-box.git
+  FORK_BRANCH: ${{ github.event.inputs.fork_branch || 'realm-hot-reload' }}
 
 jobs:
   build:
@@ -44,16 +53,20 @@ jobs:
           # sing-box 1.14.0-alpha.25 官方包用 go1.25 构建；与之对齐避免源码不兼容。
           go-version: '1.25'
 
-      - name: Clone sing-box source
+      - name: Clone sing-box source (antsbtw fork w/ hot-reload patch)
         run: |
-          git clone --depth 1 --branch "v${{ env.SINGBOX_VERSION }}" https://github.com/SagerNet/sing-box.git sing-box-src
+          # WP-3：从 antsbtw/sing-box fork 的 realm-hot-reload 分支克隆（含 WP-1 hy2 运行时热更端点）。
+          # 不再从 SagerNet 官方上游克隆——官方不含 hot_reload 块。
+          # sing-quic 改动已内联进 fork 的 third_party/sing-quic/（相对 replace），单仓即可 build。
+          git clone --depth 1 --branch "${{ env.FORK_BRANCH }}" "${{ env.FORK_REPO }}" sing-box-src
 
-      - name: Build sing-box (realm default + v2ray_api + clash_api)
+      - name: Build sing-box (realm default + v2ray_api + clash_api + hot-reload)
         run: |
           cd sing-box-src
           # realm 在 1.14 默认编入（无需 tag）；with_v2ray_api 提供 per-user 计费；
           # with_clash_api 提供踢人/连接采集（generator 配置里用了 clash_api）；
           # with_quic 提供 hysteria2；with_utls 兼容。
+          # tag 不变——热更端点 (experimental/hotreload) 是 fork 默认编入，无需新 tag。
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -tags "with_v2ray_api,with_clash_api,with_quic,with_utls" \
             -ldflags "-s -w" \
@@ -88,13 +101,16 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: singbox-v${{ env.SINGBOX_VERSION }}
-          name: sing-box v${{ env.SINGBOX_VERSION }} (realm + v2ray_api)
+          name: sing-box v${{ env.SINGBOX_VERSION }} (realm + v2ray_api + hot-reload)
           body: |
-            Pre-built sing-box for otun-realm-agent — realm punching + per-user billing.
+            Pre-built sing-box for otun-realm-agent — realm punching + per-user billing + hy2 hot-reload.
+            Built from antsbtw/sing-box@${{ env.FORK_BRANCH }} (WP-1 patch), base v${{ env.SINGBOX_VERSION }}.
             - realm hole-punching (default in 1.14.0-alpha.x source)
             - `with_v2ray_api`: per-user traffic statistics (same as otun-node-agent)
             - `with_quic`: hysteria2 inbound
             - `with_utls`
+            - hy2 runtime UpdateUsers + local hot-reload endpoint (WP-1): add/remove users
+              without dropping live connections (POST 127.0.0.1:10086/hotreload/users)
 
             Downloaded automatically by the realm-agent install script.
           files: release/*

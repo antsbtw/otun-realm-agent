@@ -56,11 +56,20 @@ type User struct {
 
 // UsersResponse 是 manager /api/node/users 对 realm 出口的扩展响应（§7.2.2）。
 // version 哈希源已扩大为 users + realm + dns（manager 侧）。
+//
+// WP-2 双 version 契约（manager 已部署，字段名权威）：
+//   - Version      = 现状合并哈希（users+realm+dns），向后兼容，老 agent 仍用。
+//   - UserVersion  = 仅哈希 user 集（剔 traffic_used + 按 uuid 排序）。只它变 → WP-3 走热更端点（不断连）。
+//   - RealmVersion = 仅哈希 realm 块 + dns 块。它变 → 仍 reload（inbound 重建无法热更）。
+//
+// 老 manager 不返回这两个字段时它们为空串，WP-3 据此降级回纯 version reload（见 syncAndApply）。
 type UsersResponse struct {
-	Version string      `json:"version"`
-	Users   []User      `json:"users"`
-	Realm   *RealmBlock `json:"realm"` // realm 出口才有
-	DNS     *DNSBlock   `json:"dns"`   // 按出口国家
+	Version      string      `json:"version"`
+	UserVersion  string      `json:"user_version"`
+	RealmVersion string      `json:"realm_version"`
+	Users        []User      `json:"users"`
+	Realm        *RealmBlock `json:"realm"` // realm 出口才有
+	DNS          *DNSBlock   `json:"dns"`   // 按出口国家
 }
 
 // HeartbeatRequest 心跳请求（计费通路，复用方言）。

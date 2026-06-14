@@ -41,6 +41,25 @@ func TestGenerator_BillingExperimental(t *testing.T) {
 	}
 }
 
+func TestGenerator_HotReloadExperimental(t *testing.T) {
+	// WP-3：必须在 experimental 块生成 hot_reload 段（listen + inbound_tag），
+	// 否则 fork sing-box 不启热更端点、agent 调它全失败。inbound_tag 必须 = hy2 inbound 的 tag。
+	out := genJSON(t, []User{{UUID: "u-1", Enabled: true}}, nil, nil)
+	if !strings.Contains(out, "hot_reload") {
+		t.Errorf("应生成 hot_reload 段（WP-3 热更端点）; got: %s", out)
+	}
+	if !strings.Contains(out, HotReloadAddr) {
+		t.Errorf("hot_reload.listen 应为 %s; got: %s", HotReloadAddr, out)
+	}
+	// inbound_tag 与 hy2 inbound 的 tag 必须一致。
+	if !strings.Contains(out, "\"inbound_tag\":\""+HY2InboundTag+"\"") {
+		t.Errorf("hot_reload.inbound_tag 应 = %q（hy2 inbound 的 tag）; got: %s", HY2InboundTag, out)
+	}
+	if !strings.Contains(out, "\"tag\":\""+HY2InboundTag+"\"") {
+		t.Errorf("hy2 inbound 的 tag 应 = %q; got: %s", HY2InboundTag, out)
+	}
+}
+
 func TestGenerator_StunServersPassthrough(t *testing.T) {
 	// 真机核实（PoC + 官方 sing-box 1.14.0-alpha.25 `check` 通过）：域名 STUN 可用。
 	// 故 STUN 原样下发，不过滤——含域名与 IP 都应原样出现在配置中。

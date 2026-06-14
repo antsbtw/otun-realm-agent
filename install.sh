@@ -86,24 +86,31 @@ case $ARCH in
     *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
 esac
 
-# ============ sing-box（★带 realm 打洞 + v2ray_api 计费，自编译预发布）============
+# ============ sing-box（★带 realm 打洞 + v2ray_api 计费 + hy2 热更，自编译预发布）============
 # 照搬 otun-node-agent 的方案：realm-agent 自己用 build-singbox 工作流编译
-# “1.14.0-alpha.25 源码（realm 默认）+ with_v2ray_api（per-user 计费）+ with_quic（hy2）”，
+# “1.14.0-alpha.25 源码（realm 默认）+ with_v2ray_api（per-user 计费）+ with_quic（hy2）+ WP-1 热更 patch”，
 # 发布到 realm-agent 自己的 release（tag singbox-v<版本>，资产为裸二进制）。
-# 不复用 node-agent 的二进制（那个版本旧、无 realm）；也不用官方预编译包（那个无 v2ray_api）。
-echo -e "${GREEN}Downloading sing-box (realm + v2ray_api)...${NC}"
+# 不复用 node-agent 的二进制（那个版本旧、无 realm）；也不用官方预编译包（那个无 v2ray_api 也无热更）。
+#
+# ★WP-3：sing-box 源已切到 antsbtw/sing-box fork（分支 realm-hot-reload，含 WP-1 hy2 运行时热更端点）。
+#   主路径（预编译）：URL 不变，但其 release 资产由 build-singbox 工作流从 fork 重编出（已切源）。
+#   兜底路径（源码自编译）：必须 clone fork 而非 SagerNet 官方——否则编出无热更端点的官方版，
+#   agent 调 127.0.0.1:10086/hotreload/users 全 404/拒绝、generator 的 hot_reload 配置还会 check 失败。
+echo -e "${GREEN}Downloading sing-box (realm + v2ray_api + hot-reload)...${NC}"
 SINGBOX_VERSION="1.14.0-alpha.25"
+SINGBOX_FORK_BRANCH="realm-hot-reload"
 SINGBOX_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/singbox-v${SINGBOX_VERSION}/sing-box-linux-${SINGBOX_ARCH}"
 if ! curl -fsSL "$SINGBOX_URL" -o /usr/local/bin/sing-box; then
-    echo -e "${YELLOW}Pre-built download failed, building from source...${NC}"
+    echo -e "${YELLOW}Pre-built download failed, building from source (antsbtw fork w/ hot-reload)...${NC}"
     apt-get install -y -qq git
+    # fork 的 go.mod 已降到 go 1.24.7；用 1.25 工具链编译兼容（向下兼容 1.24 module）。
     GO_VERSION="1.25.0"
     rm -rf /usr/local/go
     curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${AGENT_ARCH}.tar.gz" -o /tmp/go.tar.gz
     tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
     export PATH=$PATH:/usr/local/go/bin
     cd /tmp && rm -rf sing-box-src
-    git clone --depth 1 --branch "v${SINGBOX_VERSION}" https://github.com/SagerNet/sing-box.git sing-box-src
+    git clone --depth 1 --branch "$SINGBOX_FORK_BRANCH" https://github.com/antsbtw/sing-box.git sing-box-src
     cd sing-box-src
     go build -tags "with_v2ray_api,with_clash_api,with_quic,with_utls" -o /usr/local/bin/sing-box ./cmd/sing-box
     cd /tmp && rm -rf sing-box-src

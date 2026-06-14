@@ -10,6 +10,12 @@ import (
 const (
 	V2RayAPIAddr = "127.0.0.1:10085"
 	ClashAPIAddr = "127.0.0.1:9090"
+	// HotReloadAddr 是 WP-1 fork sing-box 暴露的本地热更端点监听地址（仅本机 agent 调）。
+	// agent 在「仅用户集变」时 POST 此端点全量推 user 集，让运行中的 sing-box 无损换认证 +
+	// 计费集，不 reload、不断连。inbound_tag 与 generator 生成的 hy2 inbound tag 一致（HY2InboundTag）。
+	HotReloadAddr = "127.0.0.1:10086"
+	// HY2InboundTag 是 realm hy2 inbound 的 tag，热更端点据此定位要更新的 inbound。
+	HY2InboundTag = "hy2-in"
 )
 
 // RealmGenerator 生成 realm-agent 的 sing-box 配置（§7.1）。
@@ -57,7 +63,7 @@ func (g *RealmGenerator) Generate(users []User, realm *RealmBlock, dns *DNSBlock
 
 	inbound := map[string]any{
 		"type":        "hysteria2",
-		"tag":         "hy2-in",
+		"tag":         HY2InboundTag,
 		"listen":      "::",
 		"listen_port": g.hy2Port, // 本地监听口；NAT 后对外端口由打洞动态决定（§7.9）
 		"users":       hy2Users,
@@ -129,6 +135,14 @@ func (g *RealmGenerator) Generate(users []User, realm *RealmBlock, dns *DNSBlock
 			// KickUser + 连接级采集（§7.4/§7.6 复用 connections.go）。
 			"clash_api": map[string]any{
 				"external_controller": ClashAPIAddr,
+			},
+			// WP-3：热更端点（WP-1 fork sing-box 提供）。agent 在「仅用户集变」时 POST
+			// http://HotReloadAddr/hotreload/users 推全量 user 集 → 无损换认证 + v2ray_api 计费集，
+			// 不 reload、不断连。仅绑 127.0.0.1（本机 agent 调）。inbound_tag 指向上面的 hy2 inbound。
+			// 官方上游 sing-box 无此块，会 check 失败 → 故 install/build 必须用 antsbtw/sing-box fork。
+			"hot_reload": map[string]any{
+				"listen":      HotReloadAddr,
+				"inbound_tag": HY2InboundTag,
 			},
 		},
 	}
