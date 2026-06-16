@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+    # 只在 agent 源码变化时重编 agent。改 install.sh / 工作流 / 文档不重编，
+    # 否则会把 latest 二进制重传成新 sha256，使 install.sh 里钉的 sha 当场失效（自指漂移）。
+    paths-ignore:
+      - 'install.sh'
+      - '.github/**'
+      - '**.md'
   release:
     types: [created]
   workflow_dispatch:
