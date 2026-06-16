@@ -46,6 +46,10 @@ REALM_ID=""
 REALM_SERVER_URL="https://situstechnologies.com/realm"
 REGION=""
 OBS_ENDPOINT=""
+# 二进制分发 token（方案A /dl/ 镜像源）：env 默认，--dl-token 参数覆盖。
+# 仅装机时用于拉二进制，不写进 systemd/配置，运行期不需要。
+# 不带 token 时自动跳过 /dl/、直接走 GitHub（海外/不受 GFW 节点）。
+DL_TOKEN="${DL_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -57,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --realm-server-url) REALM_SERVER_URL="$2"; shift 2 ;;
         --region)           REGION="$2"; shift 2 ;;
         --obs-endpoint)     OBS_ENDPOINT="$2"; shift 2 ;;
+        --dl-token)         DL_TOKEN="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -86,6 +91,59 @@ case $ARCH in
     *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
 esac
 
+# ============ 二进制分发：/dl/ 镜像（方案A）+ GitHub 兜底 + sha256 校验 ============
+# 下载优先级：
+#   1) https://situstechnologies.com/dl/<artifact>（带 token，绕开 GFW，中国节点用）
+#   2) GitHub release（海外/不受 GFW 节点天然走这层；/dl/ 失败也回退到这）
+#   3) 调用方自行的源码编译兜底（fetch_binary 全失败返回非 0，由调用处接管）
+# 每层下载后做 sha256 校验，校验不过视同该层失败、继续往下兜底。
+DL_BASE="https://situstechnologies.com/dl"
+# 预期 sha256（随脚本走 git = 可信来源；勿与二进制放同目录）。
+# ⚠️ agent tag=latest 滚动：每次 agent 发版，下面两行 agent-* 的 sha256 需同步更新。
+#    sing-box 固定 tag，不变。
+declare -A DL_SHA256=(
+    [sing-box-linux-amd64]=efd99e964718219bad3897daecb35b8ebca219fc8165cde55ead112c9a4c1597
+    [sing-box-linux-arm64]=a73719b7d7b83399845fa8ba1623529b480815263684d208eb182bc248afdaf5
+    [agent-linux-amd64]=aaf297d8bade7c87f502977ef2e18d14ee9c78aca5f9f9c5a5f8df8d8f43ce58
+    [agent-linux-arm64]=2339a4e166b6e11ee86a48525f528ce61afb7a09dbde3bbed8da9dde3dcc190f
+)
+
+# _verify_sha256 <file> <artifact-name> -> 0 通过 / 1 不过（无预期值时跳过校验、视为通过）
+_verify_sha256() {
+    local file="$1" name="$2" expect="${DL_SHA256[$2]:-}"
+    [ -z "$expect" ] && return 0   # 无预置 sha256（不该发生）→ 不阻断
+    local got
+    got=$(sha256sum "$file" | cut -d' ' -f1)
+    if [ "$got" != "$expect" ]; then
+        echo -e "${YELLOW}  sha256 mismatch for $name (got ${got:0:12}…, want ${expect:0:12}…)${NC}"
+        return 1
+    fi
+    return 0
+}
+
+# fetch_binary <artifact-name> <github-url> <out-path> -> 0 成功且校验过 / 1 全失败（调用方走源码编译）
+# token 不进日志（curl -H 不回显）。
+fetch_binary() {
+    local name="$1" gh_url="$2" out="$3"
+    # 第 1 层：/dl/（仅当有 token）
+    if [ -n "$DL_TOKEN" ]; then
+        echo -e "${GREEN}  [1/2] /dl/ mirror: $name${NC}"
+        if curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" "$DL_BASE/$name" -o "$out" \
+           && _verify_sha256 "$out" "$name"; then
+            return 0
+        fi
+        echo -e "${YELLOW}  /dl/ failed or sha256 mismatch, falling back to GitHub${NC}"
+        rm -f "$out"
+    fi
+    # 第 2 层：GitHub release
+    echo -e "${GREEN}  [2/2] GitHub: $name${NC}"
+    if curl -fsSL "$gh_url" -o "$out" && _verify_sha256 "$out" "$name"; then
+        return 0
+    fi
+    rm -f "$out"
+    return 1   # 两层都失败 → 调用方走源码编译
+}
+
 # ============ sing-box（★带 realm 打洞 + v2ray_api 计费 + hy2 热更，自编译预发布）============
 # 照搬 otun-node-agent 的方案：realm-agent 自己用 build-singbox 工作流编译
 # “1.14.0-alpha.25 源码（realm 默认）+ with_v2ray_api（per-user 计费）+ with_quic（hy2）+ WP-1 热更 patch”，
@@ -100,7 +158,7 @@ echo -e "${GREEN}Downloading sing-box (realm + v2ray_api + hot-reload)...${NC}"
 SINGBOX_VERSION="1.14.0-alpha.25"
 SINGBOX_FORK_BRANCH="realm-hot-reload"
 SINGBOX_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/singbox-v${SINGBOX_VERSION}/sing-box-linux-${SINGBOX_ARCH}"
-if ! curl -fsSL "$SINGBOX_URL" -o /usr/local/bin/sing-box; then
+if ! fetch_binary "sing-box-linux-${SINGBOX_ARCH}" "$SINGBOX_URL" /usr/local/bin/sing-box; then
     echo -e "${YELLOW}Pre-built download failed, building from source (antsbtw fork w/ hot-reload)...${NC}"
     apt-get install -y -qq git
     # fork 的 go.mod 已降到 go 1.24.7；用 1.25 工具链编译兼容（向下兼容 1.24 module）。
@@ -126,7 +184,7 @@ echo -e "${GREEN}sing-box installed: $(sing-box version | head -1)${NC}"
 # ============ realm-agent 二进制 ============
 echo -e "${GREEN}Downloading OTun Realm Agent...${NC}"
 AGENT_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/latest/agent-linux-${AGENT_ARCH}"
-if curl -fsSL "$AGENT_URL" -o $INSTALL_DIR/agent; then
+if fetch_binary "agent-linux-${AGENT_ARCH}" "$AGENT_URL" "$INSTALL_DIR/agent"; then
     chmod +x $INSTALL_DIR/agent
     echo -e "${GREEN}Agent downloaded${NC}"
 else
