@@ -104,8 +104,8 @@ DL_BASE="https://situstechnologies.com/dl"
 declare -A DL_SHA256=(
     [sing-box-linux-amd64]=efd99e964718219bad3897daecb35b8ebca219fc8165cde55ead112c9a4c1597
     [sing-box-linux-arm64]=a73719b7d7b83399845fa8ba1623529b480815263684d208eb182bc248afdaf5
-    [agent-linux-amd64]=aaf297d8bade7c87f502977ef2e18d14ee9c78aca5f9f9c5a5f8df8d8f43ce58
-    [agent-linux-arm64]=2339a4e166b6e11ee86a48525f528ce61afb7a09dbde3bbed8da9dde3dcc190f
+    [agent-linux-amd64]=61aba32201ed2265a3505eba3d07db1903921d3d20e7844916ddd03180c8d6db
+    [agent-linux-arm64]=072ae31a331be6cb2688a71a19a8f083db0cc9a792f0913fdfd38bc74bbe8c83
 )
 
 # _verify_sha256 <file> <artifact-name> -> 0 通过 / 1 不过（无预期值时跳过校验、视为通过）
