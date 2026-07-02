@@ -1,163 +1,203 @@
 package config
 
 import (
-	"encoding/json"
-	"fmt"
+	"log"
 	"os"
+
+	"github.com/antsbtw/otun-s-egress/egress"
 )
 
-// 本地 sing-box API 地址（照搬 node-agent 约定）。
-const (
-	V2RayAPIAddr = "127.0.0.1:10085"
-	ClashAPIAddr = "127.0.0.1:9090"
-	// HotReloadAddr 是 WP-1 fork sing-box 暴露的本地热更端点监听地址（仅本机 agent 调）。
-	// agent 在「仅用户集变」时 POST 此端点全量推 user 集，让运行中的 sing-box 无损换认证 +
-	// 计费集，不 reload、不断连。inbound_tag 与 generator 生成的 hy2 inbound tag 一致（HY2InboundTag）。
-	HotReloadAddr = "127.0.0.1:10086"
-	// HY2InboundTag 是 realm hy2 inbound 的 tag，热更端点据此定位要更新的 inbound。
-	HY2InboundTag = "hy2-in"
-)
+// HY2InboundTag 保留为逻辑常量（日志/兼容），egress 库内部不需要 inbound_tag。
+const HY2InboundTag = "hy2-in"
 
-// RealmGenerator 生成 realm-agent 的 sing-box 配置（§7.1）。
-// 照搬 node-agent MultiProtocolGenerator 的结构，但只生成【一个 hy2 inbound + 内嵌 realm{} 块】，
-// 用自签 iptv.local（不走 tls-service）。realm{}/dns 参数全部来自 manager 下发（§7.2），不写死。
+// placeholderUUID 是无启用用户时喂给 tuic/reality/vmess egress.New 的合法占位 UUID
+// （nil UUID）。仅为让 New 不因空 UUID 失败；UpdateUsers(空集) 随后把它清掉。
+const placeholderUUID = "00000000-0000-0000-0000-000000000000"
+
+// SeedUUID 返回用户集里第一个启用用户的 UUID 作 seed（一 UUID 贯穿六协议）。
+// 无启用用户返回空串，调用方（或 BuildConfigs）退回 placeholderUUID。
+func SeedUUID(users []User) string {
+	for _, u := range users {
+		if u.Enabled {
+			return u.UUID
+		}
+	}
+	return ""
+}
+
+// RealmGenerator 把 manager 下发的 users + realm 块「翻译」成 egress 库入参
+// （六协议：每启用协议一个 egress.Config + 全协议共享的 []egress.User）。
+// 不再渲染 sing-box JSON、不落盘、不生成 v2ray_api/clash_api/hot_reload 段——这些随
+// exec-fork 方案一并删除（scheme 甲）。
+//
+// 自签 iptv.local 证书仍由 SelfSigner 生成并持久化（跨重启稳定）；本生成器把 PEM
+// 内容读出来注入 hy2/tuic 的 Config.CertPEM/KeyPEM（其余协议 WrapTLS 洞内自签）。
 type RealmGenerator struct {
-	hy2Port  int
 	certPath string
 	keyPath  string
 }
 
-// NewRealmGenerator 创建 realm 配置生成器。
-func NewRealmGenerator(hy2Port int, certPath, keyPath string) *RealmGenerator {
+// NewRealmGenerator 创建 realm 入参生成器。
+// 六协议后不再持单一 hy2Port——本地端口按协议用 config.LocalPort 常量派生。
+func NewRealmGenerator(certPath, keyPath string) *RealmGenerator {
 	return &RealmGenerator{
-		hy2Port:  hy2Port,
 		certPath: certPath,
 		keyPath:  keyPath,
 	}
 }
 
-// Generate 生成 realm sing-box 配置。
-// realm/dns 为 manager 下发块（可能为 nil，例如首次注册前——此时只生成可启动的最小配置）。
-func (g *RealmGenerator) Generate(users []User, realm *RealmBlock, dns *DNSBlock) map[string]any {
-	// per-user：UUID 作 hy2 密码（§7.1.1 / §7.8.2，锁定决策）。
-	var hy2Users []map[string]any
-	var statsUsers []string
+// BuildUsers 把 manager 下发的 users 映射成 egress.User（仅 Enabled），★一 UUID 贯穿六协议：
+// egress.User 只有一个 Password 字段，被 hy2/tuic/trojan/ss 共用，各 node 的 UpdateUsers 按
+// 各自协议只读它需要的字段（hy2 读 Password 作 hy2 密码、ss 读 Password 作 ss 密码、tuic/
+// vmess/reality 读 UUID 作 wire uuid）。当前实现一律 Password=UUID、UUID=UUID，使一 UUID 同时
+// 承载六协议凭证。
+//
+// SSPassword（下发契约字段）：egress.User 目前无独立 ss password 字段，无法在保持"一 UUID
+// 贯穿"的同时给 ss 单独 password（会与其余协议的 UUID 冲突）。故当前保持贯穿、ss 也用 UUID；
+// 该字段为契约占位，待 egress 增独立 ss 字段后启用。
+func BuildUsers(users []User) []egress.User {
+	out := make([]egress.User, 0, len(users))
 	for _, u := range users {
 		if !u.Enabled {
 			continue
 		}
-		hy2Users = append(hy2Users, map[string]any{
-			"name":     u.UUID, // name 用于 V2Ray API 用户流量统计
-			"password": u.UUID,
+		out = append(out, egress.User{
+			UUID:     u.UUID,
+			Password: u.UUID, // 一 UUID 贯穿：既作 UUID 又作各协议 password
 		})
-		statsUsers = append(statsUsers, u.UUID)
 	}
-	if hy2Users == nil {
-		hy2Users = []map[string]any{}
+	return out
+}
+
+// BuildConfigs 把 manager 下发的 realm 块映射成六协议 egress.Config 集。
+// 按 realm.Protocols 循环，每协议构造一个 Config：
+//   - 派生 realm_id = <base>-<proto>（会合面一 token 多 realm_id，总设计 §4）
+//   - 填该协议 §2 表的字段
+//   - 本地端口用 config.LocalPort 常量（调用方 Start 时用它开 UDP）
+//
+// realm 为 nil（首次注册前）或无启用协议时返回空切片，调用方据此知道还不能起 node。
+// ★不注入 Config.Meter——共享 Registry 的注入交给调用方（cmd/agent 用 NewShared 或
+// 逐个注入同一 Registry，见施工单 §3.7）。
+//
+// ★seedUUID：tuic/reality/vmess 的 egress.New 在建服务时需要一个合法 UUID 作 seed user
+// （egress node 的 New 内部会用它跑一次初始 UpdateUsers，随后被 agent 的全量 UpdateUsers
+// 覆盖）。传入首个启用用户的 UUID（一 UUID 贯穿六协议）；无启用用户时用占位合法 UUID，
+// New 不致失败，UpdateUsers(空集) 随后清空。此值只是 bootstrap，不决定计费/认证。
+func (g *RealmGenerator) BuildConfigs(realm *RealmBlock, seedUUID string) []egress.Config {
+	if realm == nil {
+		return nil
+	}
+	if seedUUID == "" {
+		seedUUID = placeholderUUID
+	}
+	protocols := realm.Protocols
+	if len(protocols) == 0 {
+		// 兼容：manager 尚未下发 protocols 时，退回单 hy2（旧行为），不致完全瘫痪。
+		protocols = []string{"hysteria2"}
 	}
 
 	sni := "iptv.local"
-	if realm != nil && realm.SNI != "" {
+	if realm.SNI != "" {
 		sni = realm.SNI
 	}
+	certPEM, keyPEM, haveCert := g.readCertPEM()
 
-	inbound := map[string]any{
-		"type":        "hysteria2",
-		"tag":         HY2InboundTag,
-		"listen":      "::",
-		"listen_port": g.hy2Port, // 本地监听口；NAT 后对外端口由打洞动态决定（§7.9）
-		"users":       hy2Users,
-		"tls": map[string]any{
-			"enabled":          true,
-			"server_name":      sni,
-			"alpn":             []string{"h3"},
-			"certificate_path": g.certPath, // 自签，§7.1.3
-			"key_path":         g.keyPath,
-		},
-	}
+	out := make([]egress.Config, 0, len(protocols))
+	for _, proto := range protocols {
+		cfg := egress.Config{
+			Protocol:    proto,
+			ServerURL:   realm.ServerURL,
+			Token:       realm.Token,
+			RealmID:     DeriveRealmID(realm.RealmID, proto), // <base>-<proto>
+			STUNServers: realm.StunServers,                   // 域名/IP 原样透传（真机已验证域名可用）
+			SNI:         sni,
+			ALPN:        []string{"h3"},
+		}
 
-	if realm != nil {
-		// obfs：省略下发值则整块不生成（坑：obfs 两端必须一致）。
-		if realm.ObfsPassword != "" {
-			inbound["obfs"] = map[string]any{
-				"type":     "salamander",
-				"password": realm.ObfsPassword,
+		switch proto {
+		case "hysteria2":
+			cfg.Password = seedUUID // seed 凭证（hy2 password；随后被全量 UpdateUsers 覆盖）
+			// hy2 salamander obfs：两端必须一致，空则库内不启用。
+			cfg.ObfsPassword = realm.ObfsPassword
+			injectCert(&cfg, certPEM, keyPEM, haveCert) // 外层 TLS 稳定证书（B.3）
+		case "tuic":
+			cfg.UUID = seedUUID     // seed user（egress.New 需合法 UUID；随后被全量 UpdateUsers 覆盖）
+			cfg.Password = seedUUID // tuic per-user password 也用 UUID（一 UUID 贯穿）
+			cfg.CongestionControl = realm.CongestionControl
+			injectCert(&cfg, certPEM, keyPEM, haveCert)
+		case "reality":
+			cfg.UUID = seedUUID // seed user（同上）
+			cfg.PrivateKey = realm.RealityPrivateKey
+			cfg.ShortID = realm.RealityShortID
+			cfg.ServerName = realm.RealityServerName
+			if cfg.ServerName == "" {
+				cfg.ServerName = "www.apple.com" // 借壳 SNI 默认（总设计 §7）
 			}
+			cfg.HandshakeServer = realm.RealityHandshake // ★必须 IP（manager 存 IP）
+			cfg.HandshakePort = realm.RealityHandshakePort
+			// reality 用洞内 WrapTLS 自签 + Reality 握手，不用外层稳定证书。
+		case "trojan":
+			cfg.Password = seedUUID // seed 凭证（trojan password 必填；随后被全量 UpdateUsers 覆盖）
+			// trojan：per-user Password 走 egress.User；WrapTLS 洞内自签。
+		case "shadowsocks":
+			cfg.Password = seedUUID // seed 凭证（ss seed user 需 password；随后被全量 UpdateUsers 覆盖）
+			cfg.Method = realm.SSMethod
+			if cfg.Method == "" {
+				cfg.Method = "aes-128-gcm" // 节点级默认（总设计 §8）
+			}
+			// ss per-user password 走 egress.User.Password（=UUID，见 BuildUsers）。
+		case "vmess":
+			cfg.UUID = seedUUID // seed user（egress.New 要求非空 UUID；随后被全量 UpdateUsers 覆盖）
+			// vmess：per-user UUID 走 egress.User；WrapTLS 洞内自签。
+		default:
+			log.Printf("[generator] skip unknown protocol %q (not one of hy2/tuic/reality/trojan/ss/vmess)", proto)
+			continue
 		}
 
-		// ★★ realm 注册块（§7.1.2）。
-		// ⚠️ 待核实：realm 字段精确键名/层级以 sing-box 上游源码为准，实现前需 sing-box check 核验。
-		// 键名沿用客户端 PoC 已验证的语义。
-		realmBlock := map[string]any{
-			"server_url": realm.ServerURL,
-			"realm_id":   realm.RealmID,
-			"token":      realm.Token,
-		}
-		// stun_servers 原样下发。
-		// 注：设计 §4 曾标"坑#2 必须 IP 不能域名"，但真机核实（PoC + 官方 sing-box
-		// 1.14.0-alpha.25 `check` 通过）证明【域名 STUN 可用】（如 stun.l.google.com:19302）。
-		// 故不再过滤域名——以 manager 下发为准，由出口表 stun_servers 决定。
-		if len(realm.StunServers) > 0 {
-			realmBlock["stun_servers"] = realm.StunServers
-		}
-		// 坑#3：realm 块内【不要】写 http_client.detour —— 这里本就不附加。
-		inbound["realm"] = realmBlock
+		out = append(out, cfg)
 	}
-
-	// 不生成 dns 段：对齐 PoC 已验证配置（PoC 无 dns 段，realm 出口 direct 出站用系统 DNS
-	// 即可），同时规避 sing-box 1.14 移除旧 DNS server 格式 + 要求 domain_resolver 的兼容问题。
-	// manager 仍可下发 dns 块（数据层保留），但 agent 本期不渲染——经官方 1.14.0-alpha.25
-	// `check` 核实：含 realm 块、无 dns 段的配置返回 0。
-	// 不生成 dns 段：对齐 PoC 已验证配置（PoC 无 dns 段，realm 出口 direct 出站用系统 DNS
-	// 即可），同时规避 sing-box 1.14 移除旧 DNS server 格式 + 要求 domain_resolver 的兼容问题。
-	// manager 仍可下发 dns 块（数据层保留），但 agent 本期不渲染。
-	_ = dns
-	config := map[string]any{
-		"log": map[string]any{
-			"level":     "info",
-			"timestamp": true,
-		},
-		"inbounds":  []map[string]any{inbound},
-		"outbounds": []map[string]any{{"type": "direct", "tag": "direct-out"}},
-		"experimental": map[string]any{
-			// per-user 精确计量（§7.6）。★照搬 otun-node-agent 的计费方案：v2ray_api gRPC
-			// 拿 per-user 累计字节。这要求 sing-box 带 with_v2ray_api —— 由 realm-agent 自己的
-			// build-singbox 工作流编译（1.14.0-alpha.25 源码 + with_v2ray_api/with_quic 等 tag，
-			// realm 默认编入），install.sh 从 realm-agent release 拉。与已上线 node-agent 计费一致。
-			"v2ray_api": map[string]any{
-				"listen": V2RayAPIAddr,
-				"stats": map[string]any{
-					"enabled":  true,
-					"inbounds": []string{"hy2-in"},
-					"users":    statsUsers,
-				},
-			},
-			// KickUser + 连接级采集（§7.4/§7.6 复用 connections.go）。
-			"clash_api": map[string]any{
-				"external_controller": ClashAPIAddr,
-			},
-			// WP-3：热更端点（WP-1 fork sing-box 提供）。agent 在「仅用户集变」时 POST
-			// http://HotReloadAddr/hotreload/users 推全量 user 集 → 无损换认证 + v2ray_api 计费集，
-			// 不 reload、不断连。仅绑 127.0.0.1（本机 agent 调）。inbound_tag 指向上面的 hy2 inbound。
-			// 官方上游 sing-box 无此块，会 check 失败 → 故 install/build 必须用 antsbtw/sing-box fork。
-			"hot_reload": map[string]any{
-				"listen":      HotReloadAddr,
-				"inbound_tag": HY2InboundTag,
-			},
-		},
-	}
-
-	return config
+	return out
 }
 
-// WriteToFile 将配置写入文件。
-func (g *RealmGenerator) WriteToFile(config map[string]any, path string) error {
-	data, err := json.MarshalIndent(config, "", "  ")
+// DeriveRealmID 派生某协议的会合面 realm_id：<base>-<proto>（总设计 §4）。
+// proto 用短名对齐客户端范本（reference/six_protocol_client_config_sample.json 里的
+// cn-test-hy2 / cn-test-reality ...）。
+func DeriveRealmID(base, protocol string) string {
+	return base + "-" + protoShort(protocol)
+}
+
+// protoShort 把 egress 协议名映射成会合面 realm_id 后缀短名（对齐客户端范本）。
+func protoShort(protocol string) string {
+	switch protocol {
+	case "hysteria2":
+		return "hy2"
+	case "shadowsocks":
+		return "ss"
+	default:
+		return protocol // tuic / reality / trojan / vmess 原样
+	}
+}
+
+// injectCert 注入稳定自签证书（B.3）到 hy2/tuic 外层 TLS。
+// 读失败不致命——egress 会退化为每次 New 一张新自签证书（客户端 insecure TLS 不 pin）。
+func injectCert(cfg *egress.Config, certPEM, keyPEM string, have bool) {
+	if have {
+		cfg.CertPEM = certPEM
+		cfg.KeyPEM = keyPEM
+	}
+}
+
+// readCertPEM 读取 SelfSigner 落盘的 cert/key PEM 内容。
+func (g *RealmGenerator) readCertPEM() (cert, key string, ok bool) {
+	c, err := os.ReadFile(g.certPath)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		log.Printf("[generator] read cert %s failed (%v), egress will self-sign per start", g.certPath, err)
+		return "", "", false
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write file: %w", err)
+	k, err := os.ReadFile(g.keyPath)
+	if err != nil {
+		log.Printf("[generator] read key %s failed (%v), egress will self-sign per start", g.keyPath, err)
+		return "", "", false
 	}
-	return nil
+	return string(c), string(k), true
 }

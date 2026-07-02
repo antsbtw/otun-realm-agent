@@ -26,11 +26,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags with_utls ./...
       - name: Test
-        run: go test ./...
+        run: go test -tags with_utls ./...
 
   build:
     needs: test
@@ -48,11 +48,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: Build agent
         run: |
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -ldflags "-s -w" \
+            go build -tags with_utls -ldflags "-s -w" \
             -o agent-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/agent
       - name: Upload artifact

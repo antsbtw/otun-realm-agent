@@ -8,8 +8,8 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  OTun Realm Agent Installer v1.0.0${NC}"
-echo -e "${GREEN}  hy2 + realm{} residential egress${NC}"
+echo -e "${GREEN}  OTun Realm Agent Installer v2.0.0${NC}"
+echo -e "${GREEN}  six-protocol over-realm egress (egress-inproc)${NC}"
 echo -e "${GREEN}========================================${NC}"
 
 # 检查 root 权限
@@ -22,11 +22,9 @@ fi
 echo -e "${YELLOW}Cleaning up existing installation...${NC}"
 systemctl stop otun-realm-agent 2>/dev/null || true
 systemctl disable otun-realm-agent 2>/dev/null || true
-pkill -9 sing-box 2>/dev/null || true
 pkill -9 otun-realm-agent 2>/dev/null || true
 sleep 1
 rm -f /opt/otun-realm-agent/agent 2>/dev/null || true
-rm -f /etc/sing-box/config.json 2>/dev/null || true
 rm -f /etc/systemd/system/otun-realm-agent.service 2>/dev/null || true
 systemctl daemon-reload
 echo -e "${GREEN}Cleanup completed${NC}"
@@ -36,14 +34,13 @@ echo -e "${GREEN}Installing dependencies...${NC}"
 apt-get update -qq
 apt-get install -y -qq curl
 
-# ============ 参数（§7.7.1 realm 参数全集）============
-# 身份 + 首启引导最小集；realm_token/stun/obfs/sni/dns 由 manager 下发，故意不带（§4.1 动态可调）。
+# ============ 参数（realm 六协议身份 + 首启引导最小集）============
+# realm_token/stun/obfs/sni/dns/protocols/reality 密钥全部由 manager 下发，故意不带（动态可调）。
+# ★六协议本地端口 agent 用约定常量（hy2=51820...vmess=51825），不从参数传、不对外、不进 manager。
 NODE_API_KEY=""
 NODE_ID="realm-$(hostname)"
 API_URL="https://otun-manager-v3.situstechnologies.com"
-HY2_PORT=51820
 REALM_ID=""
-REALM_SERVER_URL="https://situstechnologies.com/realm"
 REGION=""
 OBS_ENDPOINT=""
 # 二进制分发 token（方案A /dl/ 镜像源）：env 默认，--dl-token 参数覆盖。
@@ -53,41 +50,39 @@ DL_TOKEN="${DL_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --api-key)          NODE_API_KEY="$2"; shift 2 ;;
-        --node-id)          NODE_ID="$2"; shift 2 ;;
-        --api-url)          API_URL="$2"; shift 2 ;;
-        --hy2-port)         HY2_PORT="$2"; shift 2 ;;
-        --realm-id)         REALM_ID="$2"; shift 2 ;;
-        --realm-server-url) REALM_SERVER_URL="$2"; shift 2 ;;
-        --region)           REGION="$2"; shift 2 ;;
-        --obs-endpoint)     OBS_ENDPOINT="$2"; shift 2 ;;
-        --dl-token)         DL_TOKEN="$2"; shift 2 ;;
+        --api-key)      NODE_API_KEY="$2"; shift 2 ;;
+        --node-id)      NODE_ID="$2"; shift 2 ;;
+        --api-url)      API_URL="$2"; shift 2 ;;
+        --realm-id)     REALM_ID="$2"; shift 2 ;;
+        --region)       REGION="$2"; shift 2 ;;
+        --obs-endpoint) OBS_ENDPOINT="$2"; shift 2 ;;
+        --dl-token)     DL_TOKEN="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
 if [ -z "$NODE_API_KEY" ]; then
     echo -e "${RED}Error: --api-key is required${NC}"
-    echo "Usage: $0 --api-key <key> --realm-id <id> [--node-id <id>] [--region <r>] [--hy2-port <port>] [--realm-server-url <url>] [--obs-endpoint <url>]"
+    echo "Usage: $0 --api-key <key> --realm-id <id> [--node-id <id>] [--region <r>] [--api-url <url>] [--obs-endpoint <url>]"
     exit 1
 fi
 if [ -z "$REALM_ID" ]; then
-    echo -e "${RED}Error: --realm-id is required (realm slot identifier, e.g. iptv-cn-sh)${NC}"
+    echo -e "${RED}Error: --realm-id is required (realm slot base id, e.g. iptv-sg-01)${NC}"
     exit 1
 fi
 
 echo -e "${YELLOW}Node ID:    ${NODE_ID}${NC}"
-echo -e "${YELLOW}Realm ID:   ${REALM_ID}${NC}"
-echo -e "${YELLOW}HY2 Port:   ${HY2_PORT}${NC}"
+echo -e "${YELLOW}Realm ID:   ${REALM_ID} (base; each protocol registers <base>-<proto>)${NC}"
 echo -e "${YELLOW}Region:     ${REGION:-(auto GeoIP)}${NC}"
+echo -e "${YELLOW}Protocols:  pushed by manager; local ports hy2=51820 tuic=51821 reality=51822 trojan=51823 ss=51824 vmess=51825${NC}"
 
 INSTALL_DIR="/opt/otun-realm-agent"
-mkdir -p $INSTALL_DIR/data/certs /etc/sing-box
+mkdir -p "$INSTALL_DIR/data/certs"
 
 ARCH=$(uname -m)
 case $ARCH in
-    x86_64)  AGENT_ARCH="amd64"; SINGBOX_ARCH="amd64" ;;
-    aarch64) AGENT_ARCH="arm64"; SINGBOX_ARCH="arm64" ;;
+    x86_64)  AGENT_ARCH="amd64" ;;
+    aarch64) AGENT_ARCH="arm64" ;;
     *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
 esac
 
@@ -95,15 +90,12 @@ esac
 # 下载优先级：
 #   1) https://situstechnologies.com/dl/<artifact>（带 token，绕开 GFW，中国节点用）
 #   2) GitHub release（海外/不受 GFW 节点天然走这层；/dl/ 失败也回退到这）
-#   3) 调用方自行的源码编译兜底（fetch_binary 全失败返回非 0，由调用处接管）
+#   3) 源码自编译兜底（fetch_binary 全失败返回非 0，由调用处接管；★带 -tags with_utls）
 # 每层下载后做 sha256 校验，校验不过视同该层失败、继续往下兜底。
 DL_BASE="https://situstechnologies.com/dl"
 # 预期 sha256（随脚本走 git = 可信来源；勿与二进制放同目录）。
-# ⚠️ agent tag=latest 滚动：每次 agent 发版，下面两行 agent-* 的 sha256 需同步更新。
-#    sing-box 固定 tag，不变。
+# ⚠️ agent tag=latest 滚动：每次 agent 发版，下面 agent-* 的 sha256 需同步更新。
 declare -A DL_SHA256=(
-    [sing-box-linux-amd64]=efd99e964718219bad3897daecb35b8ebca219fc8165cde55ead112c9a4c1597
-    [sing-box-linux-arm64]=a73719b7d7b83399845fa8ba1623529b480815263684d208eb182bc248afdaf5
     [agent-linux-amd64]=f902a62a50edd1cdcb0b93d32a335742dfbc9a334ee5ef6694bd40319025ed1a
     [agent-linux-arm64]=e49d9185721cebcba610f554ac4a85bad6a3fb59a97be62345f5ef8c4b58742a
 )
@@ -144,80 +136,45 @@ fetch_binary() {
     return 1   # 两层都失败 → 调用方走源码编译
 }
 
-# ============ sing-box（★带 realm 打洞 + v2ray_api 计费 + hy2 热更，自编译预发布）============
-# 照搬 otun-node-agent 的方案：realm-agent 自己用 build-singbox 工作流编译
-# “1.14.0-alpha.25 源码（realm 默认）+ with_v2ray_api（per-user 计费）+ with_quic（hy2）+ WP-1 热更 patch”，
-# 发布到 realm-agent 自己的 release（tag singbox-v<版本>，资产为裸二进制）。
-# 不复用 node-agent 的二进制（那个版本旧、无 realm）；也不用官方预编译包（那个无 v2ray_api 也无热更）。
-#
-# ★WP-3：sing-box 源已切到 antsbtw/sing-box fork（分支 realm-hot-reload，含 WP-1 hy2 运行时热更端点）。
-#   主路径（预编译）：URL 不变，但其 release 资产由 build-singbox 工作流从 fork 重编出（已切源）。
-#   兜底路径（源码自编译）：必须 clone fork 而非 SagerNet 官方——否则编出无热更端点的官方版，
-#   agent 调 127.0.0.1:10086/hotreload/users 全 404/拒绝、generator 的 hot_reload 配置还会 check 失败。
-echo -e "${GREEN}Downloading sing-box (realm + v2ray_api + hot-reload)...${NC}"
-SINGBOX_VERSION="1.14.0-alpha.25"
-SINGBOX_FORK_BRANCH="realm-hot-reload"
-SINGBOX_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/singbox-v${SINGBOX_VERSION}/sing-box-linux-${SINGBOX_ARCH}"
-if ! fetch_binary "sing-box-linux-${SINGBOX_ARCH}" "$SINGBOX_URL" /usr/local/bin/sing-box; then
-    echo -e "${YELLOW}Pre-built download failed, building from source (antsbtw fork w/ hot-reload)...${NC}"
-    apt-get install -y -qq git
-    # fork 的 go.mod 已降到 go 1.24.7；用 1.25 工具链编译兼容（向下兼容 1.24 module）。
-    GO_VERSION="1.25.0"
-    rm -rf /usr/local/go
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${AGENT_ARCH}.tar.gz" -o /tmp/go.tar.gz
-    tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
-    export PATH=$PATH:/usr/local/go/bin
-    cd /tmp && rm -rf sing-box-src
-    git clone --depth 1 --branch "$SINGBOX_FORK_BRANCH" https://github.com/antsbtw/sing-box.git sing-box-src
-    cd sing-box-src
-    go build -tags "with_v2ray_api,with_clash_api,with_quic,with_utls" -o /usr/local/bin/sing-box ./cmd/sing-box
-    cd /tmp && rm -rf sing-box-src
-fi
-cd "$INSTALL_DIR"
-chmod +x /usr/local/bin/sing-box
-setcap cap_net_bind_service=+ep /usr/local/bin/sing-box 2>/dev/null || true
-if ! sing-box version > /dev/null 2>&1; then
-    echo -e "${RED}sing-box verification failed${NC}"; exit 1
-fi
-echo -e "${GREEN}sing-box installed: $(sing-box version | head -1)${NC}"
-
-# ============ realm-agent 二进制 ============
-echo -e "${GREEN}Downloading OTun Realm Agent...${NC}"
+# ============ realm-agent 二进制（egress 内嵌六协议版）============
+# ★egress 库化后 agent 不再需要任何外部代理引擎二进制：六协议引擎由 egress 库进程内驱动，
+#   无 exec-fork、无落盘引擎配置文件、无 v2ray_api/clash_api/hotreload IPC。
+# ★源码兜底必须带 -tags with_utls（reality 借壳握手需要 utls）。
+echo -e "${GREEN}Downloading OTun Realm Agent (egress-inproc, six-protocol)...${NC}"
 AGENT_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/latest/agent-linux-${AGENT_ARCH}"
 if fetch_binary "agent-linux-${AGENT_ARCH}" "$AGENT_URL" "$INSTALL_DIR/agent"; then
-    chmod +x $INSTALL_DIR/agent
+    chmod +x "$INSTALL_DIR/agent"
     echo -e "${GREEN}Agent downloaded${NC}"
 else
-    echo -e "${YELLOW}Download failed, building from source...${NC}"
+    echo -e "${YELLOW}Download failed, building from source (with_utls for reality)...${NC}"
     apt-get install -y -qq git
+    GO_VERSION="1.25.5"
+    if ! command -v go >/dev/null 2>&1; then
+        rm -rf /usr/local/go
+        curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${AGENT_ARCH}.tar.gz" -o /tmp/go.tar.gz
+        tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
+    fi
     export PATH=$PATH:/usr/local/go/bin
     command -v go >/dev/null 2>&1 || { echo -e "${RED}Go not available for source build${NC}"; exit 1; }
     cd /tmp && rm -rf otun-realm-agent-src
     git clone https://github.com/antsbtw/otun-realm-agent.git otun-realm-agent-src
     cd otun-realm-agent-src
-    go build -o $INSTALL_DIR/agent ./cmd/agent
+    CGO_ENABLED=0 go build -tags with_utls -o "$INSTALL_DIR/agent" ./cmd/agent
     cd /tmp && rm -rf otun-realm-agent-src
 fi
 [ -f "$INSTALL_DIR/agent" ] || { echo -e "${RED}Agent binary not found${NC}"; exit 1; }
+chmod +x "$INSTALL_DIR/agent"
+# 六协议本地 UDP 端口均 > 1024，无需 CAP_NET_BIND_SERVICE。
 echo -e "${GREEN}Agent ready${NC}"
 
-# 初始最小配置（agent 首启会用下发配置覆盖）
-cat > /etc/sing-box/config.json << 'CONF'
-{
-  "log": {"level": "info", "timestamp": true},
-  "inbounds": [],
-  "outbounds": [{"type": "direct", "tag": "direct"}]
-}
-CONF
-
-# ============ systemd 服务（§7.7.1 环境变量映射，固定 MANAGEMENT_MODE=remote）============
+# ============ systemd 服务（六协议 env；固定 MANAGEMENT_MODE=remote）============
+# ★去掉 HY2_PORT / REALM_SERVER_URL / 旧引擎相关 env：端口是 agent 本地常量，server_url 由
+#   manager 下发，六协议引擎内嵌无需外部代理二进制。
 ENV_VARS="Environment=\"NODE_API_KEY=$NODE_API_KEY\"
 Environment=\"NODE_ID=$NODE_ID\"
 Environment=\"OTUN_API_URL=$API_URL\"
 Environment=\"MANAGEMENT_MODE=remote\"
-Environment=\"REALM_ID=$REALM_ID\"
-Environment=\"REALM_SERVER_URL=$REALM_SERVER_URL\"
-Environment=\"HY2_PORT=$HY2_PORT\""
+Environment=\"REALM_ID=$REALM_ID\""
 if [ -n "$REGION" ]; then
     ENV_VARS="$ENV_VARS
 Environment=\"REALM_REGION=$REGION\""
@@ -229,7 +186,7 @@ fi
 
 cat > /etc/systemd/system/otun-realm-agent.service << SYSTEMD
 [Unit]
-Description=OTun Realm Agent
+Description=OTun Realm Agent (six-protocol egress)
 After=network.target
 
 [Service]
@@ -267,8 +224,7 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Installation Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo -e "Node ID:  ${YELLOW}$NODE_ID${NC}"
-echo -e "Realm ID: ${YELLOW}$REALM_ID${NC}"
-echo -e "Config:   ${YELLOW}/etc/sing-box/config.json${NC}"
+echo -e "Realm ID: ${YELLOW}$REALM_ID${NC} (base)"
 echo -e "Data:     ${YELLOW}$INSTALL_DIR/data${NC}"
 echo ""
 echo -e "Commands:"
@@ -276,5 +232,6 @@ echo -e "  ${YELLOW}realm status${NC}  - Check service status"
 echo -e "  ${YELLOW}realm logs${NC}    - View logs"
 echo -e "  ${YELLOW}realm restart${NC} - Restart service"
 echo ""
-echo -e "${YELLOW}Note:${NC} realm_token / stun / obfs / sni / dns are pushed by manager"
-echo -e "      via /api/node/users (§4.1 dynamic config); not set at install time."
+echo -e "${YELLOW}Note:${NC} protocols / realm token / stun / obfs / ss_method / reality keys / sni / dns"
+echo -e "      are all pushed by manager via /api/node/users (dynamic config); not set at install time."
+echo -e "      Six-protocol local UDP ports are agent-internal constants (not exposed, not in manager)."

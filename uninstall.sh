@@ -14,13 +14,10 @@ echo -e "${YELLOW}Uninstalling OTun Realm Agent...${NC}"
 
 systemctl stop otun-realm-agent 2>/dev/null || true
 systemctl disable otun-realm-agent 2>/dev/null || true
-pkill -9 sing-box 2>/dev/null || true
 pkill -9 otun-realm-agent 2>/dev/null || true
 
 rm -f /etc/systemd/system/otun-realm-agent.service
 rm -f /usr/local/bin/realm
-rm -f /usr/local/bin/sing-box
-rm -f /etc/sing-box/config.json
 systemctl daemon-reload
 
 # 保留 data 目录（含自签证书），如需彻底清除请手动:

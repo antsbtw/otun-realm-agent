@@ -1,107 +1,237 @@
 package config
 
 import (
-	"encoding/json"
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/antsbtw/otun-s-egress/egress"
 )
 
-func genJSON(t *testing.T, users []User, realm *RealmBlock, dns *DNSBlock) string {
-	t.Helper()
-	g := NewRealmGenerator(51820, "/c.crt", "/c.key")
-	cfg := g.Generate(users, realm, dns)
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return string(data)
-}
+// egressConfig aliases egress.Config so test helpers read cleanly.
+type egressConfig = egress.Config
 
-func TestGenerator_NoDNSSection(t *testing.T) {
-	// 对齐 PoC + 规避 sing-box 1.14 DNS 迁移：agent 不生成 dns 段（即便 manager 下发了 dns 块）。
-	// 经官方 1.14.0-alpha.25 `check` 核实：含 realm、无 dns 段的配置返回 0。
-	out := genJSON(t, nil, nil, &DNSBlock{Country: "CN", Servers: []string{"223.5.5.5"}})
-	if strings.Contains(out, "\"dns\"") {
-		t.Errorf("不应生成 dns 段（对齐 PoC，避免 1.14 旧 DNS 格式报错）; got: %s", out)
-	}
-	if strings.Contains(out, "223.5.5.5") {
-		t.Errorf("下发的 dns servers 不应进入配置; got: %s", out)
-	}
-}
-
-func TestGenerator_BillingExperimental(t *testing.T) {
-	// 照搬 node-agent 计费方案：必须生成 v2ray_api（per-user 精确计量）+ clash_api（踢人/采集）。
-	// 守护这一不变量：防止 v2ray_api 被误删（误删则与 node-agent 计费不一致）。
-	out := genJSON(t, []User{{UUID: "u-1", Enabled: true}}, nil, nil)
-	if !strings.Contains(out, "v2ray_api") {
-		t.Errorf("应生成 v2ray_api（per-user 精确计费，对齐 node-agent）; got: %s", out)
-	}
-	if !strings.Contains(out, "clash_api") {
-		t.Errorf("应生成 clash_api（踢人/连接采集）; got: %s", out)
-	}
-}
-
-func TestGenerator_HotReloadExperimental(t *testing.T) {
-	// WP-3：必须在 experimental 块生成 hot_reload 段（listen + inbound_tag），
-	// 否则 fork sing-box 不启热更端点、agent 调它全失败。inbound_tag 必须 = hy2 inbound 的 tag。
-	out := genJSON(t, []User{{UUID: "u-1", Enabled: true}}, nil, nil)
-	if !strings.Contains(out, "hot_reload") {
-		t.Errorf("应生成 hot_reload 段（WP-3 热更端点）; got: %s", out)
-	}
-	if !strings.Contains(out, HotReloadAddr) {
-		t.Errorf("hot_reload.listen 应为 %s; got: %s", HotReloadAddr, out)
-	}
-	// inbound_tag 与 hy2 inbound 的 tag 必须一致。
-	if !strings.Contains(out, "\"inbound_tag\":\""+HY2InboundTag+"\"") {
-		t.Errorf("hot_reload.inbound_tag 应 = %q（hy2 inbound 的 tag）; got: %s", HY2InboundTag, out)
-	}
-	if !strings.Contains(out, "\"tag\":\""+HY2InboundTag+"\"") {
-		t.Errorf("hy2 inbound 的 tag 应 = %q; got: %s", HY2InboundTag, out)
-	}
-}
-
-func TestGenerator_StunServersPassthrough(t *testing.T) {
-	// 真机核实（PoC + 官方 sing-box 1.14.0-alpha.25 `check` 通过）：域名 STUN 可用。
-	// 故 STUN 原样下发，不过滤——含域名与 IP 都应原样出现在配置中。
-	realm := &RealmBlock{
-		RealmID:     "iptv-cn-sh",
-		ServerURL:   "https://situstechnologies.com/realm",
-		Token:       "tok",
-		StunServers: []string{"stun.l.google.com:19302", "74.125.250.129:19302"}, // 域名 + IP
-	}
-	out := genJSON(t, nil, realm, nil)
-	if !strings.Contains(out, "stun.l.google.com:19302") {
-		t.Errorf("域名 STUN 应原样下发（真机已验证可用）; got: %s", out)
-	}
-	if !strings.Contains(out, "74.125.250.129:19302") {
-		t.Errorf("IP STUN 应保留")
-	}
-}
-
-func TestGenerator_NoHTTPClientDetour_Pitfall3(t *testing.T) {
-	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t"}
-	out := genJSON(t, nil, realm, nil)
-	if strings.Contains(out, "http_client") {
-		t.Errorf("realm 块内不得有 http_client (坑#3); got: %s", out)
-	}
-}
-
-func TestGenerator_UUIDAsHy2Password(t *testing.T) {
+func TestBuildUsers_UUIDAsPassword(t *testing.T) {
 	users := []User{{UUID: "uuid-1", Enabled: true}}
-	out := genJSON(t, users, nil, nil)
-	// per-user UUID 既作 name 又作 password。
-	if strings.Count(out, "uuid-1") < 2 {
-		t.Errorf("UUID 应同时作 name 和 password; got: %s", out)
+	got := BuildUsers(users)
+	if len(got) != 1 {
+		t.Fatalf("want 1 user, got %d", len(got))
+	}
+	// ★一 UUID 贯穿六协议：UUID 既作 UUID 又作 Password（hy2/trojan/tuic 密码 = UUID）。
+	if got[0].UUID != "uuid-1" || got[0].Password != "uuid-1" {
+		t.Errorf("UUID 应同时作 UUID 和 Password; got %+v", got[0])
 	}
 }
 
-func TestGenerator_DisabledUserExcluded(t *testing.T) {
+func TestBuildUsers_DisabledUserExcluded(t *testing.T) {
 	users := []User{
 		{UUID: "on", Enabled: true},
 		{UUID: "off", Enabled: false},
 	}
-	out := genJSON(t, users, nil, nil)
-	if strings.Contains(out, "off") {
-		t.Errorf("禁用用户不应出现在配置中; got: %s", out)
+	got := BuildUsers(users)
+	if len(got) != 1 || got[0].UUID != "on" {
+		t.Errorf("禁用用户不应出现; got %+v", got)
+	}
+}
+
+func TestBuildUsers_SSPasswordKeepsUUIDPassthrough(t *testing.T) {
+	// ★egress.User 单 Password 字段限制下，仍以 UUID 贯穿全协议（ss_password 占位不破坏其余协议）。
+	users := []User{{UUID: "uuid-1", Enabled: true, SSPassword: "ss-secret"}}
+	got := BuildUsers(users)
+	if len(got) != 1 || got[0].Password != "uuid-1" {
+		t.Errorf("即便下发 ss_password，Password 仍应为 UUID（贯穿）; got %+v", got)
+	}
+}
+
+func TestBuildConfigs_NilRealmNotReady(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	if cfgs := g.BuildConfigs(nil, ""); len(cfgs) != 0 {
+		t.Errorf("realm 为 nil 时 BuildConfigs 应返回空（尚不能起 node）; got %d", len(cfgs))
+	}
+}
+
+func TestBuildConfigs_SixProtocols(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	realm := &RealmBlock{
+		RealmID:              "iptv-cn-sh",
+		ServerURL:            "http://rendezvous:9443",
+		Token:                "tok",
+		StunServers:          []string{"74.125.250.129:19302"},
+		Protocols:            []string{"hysteria2", "tuic", "reality", "trojan", "shadowsocks", "vmess"},
+		ObfsPassword:         "obfs-secret",
+		SSMethod:             "aes-256-gcm",
+		CongestionControl:    "bbr",
+		RealityPrivateKey:    "priv",
+		RealityShortID:       "0123456789abcdef",
+		RealityHandshake:     "1.2.3.4",
+		RealityHandshakePort: 443,
+	}
+	cfgs := g.BuildConfigs(realm, "seed-uuid")
+	if len(cfgs) != 6 {
+		t.Fatalf("want 6 configs, got %d", len(cfgs))
+	}
+
+	byProto := Config2(cfgs)
+	// realm_id 派生 <base>-<proto>（对齐客户端范本短名）。
+	assertRealmID(t, byProto, "hysteria2", "iptv-cn-sh-hy2")
+	assertRealmID(t, byProto, "tuic", "iptv-cn-sh-tuic")
+	assertRealmID(t, byProto, "reality", "iptv-cn-sh-reality")
+	assertRealmID(t, byProto, "trojan", "iptv-cn-sh-trojan")
+	assertRealmID(t, byProto, "shadowsocks", "iptv-cn-sh-ss")
+	assertRealmID(t, byProto, "vmess", "iptv-cn-sh-vmess")
+
+	// 公共字段透传。
+	for _, c := range cfgs {
+		if c.ServerURL != realm.ServerURL || c.Token != realm.Token {
+			t.Errorf("%s: rendezvous 未透传; got %+v", c.Protocol, c)
+		}
+		if c.SNI != "iptv.local" {
+			t.Errorf("%s: 默认 SNI 应 iptv.local; got %q", c.Protocol, c.SNI)
+		}
+	}
+
+	// 协议级凭证。
+	if byProto["hysteria2"].ObfsPassword != "obfs-secret" {
+		t.Errorf("hy2 obfs 未透传")
+	}
+	if byProto["tuic"].CongestionControl != "bbr" {
+		t.Errorf("tuic cc 未透传")
+	}
+	if byProto["shadowsocks"].Method != "aes-256-gcm" {
+		t.Errorf("ss method 未透传; got %q", byProto["shadowsocks"].Method)
+	}
+	r := byProto["reality"]
+	if r.PrivateKey != "priv" || r.ShortID != "0123456789abcdef" || r.HandshakeServer != "1.2.3.4" || r.HandshakePort != 443 {
+		t.Errorf("reality 参数未透传; got %+v", r)
+	}
+	if r.ServerName != "www.apple.com" {
+		t.Errorf("reality server_name 空时应默认 www.apple.com; got %q", r.ServerName)
+	}
+}
+
+func TestBuildConfigs_EmptyProtocolsFallsBackHy2(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t"} // 无 protocols
+	cfgs := g.BuildConfigs(realm, "seed-uuid")
+	if len(cfgs) != 1 || cfgs[0].Protocol != "hysteria2" {
+		t.Errorf("无 protocols 应退回单 hy2; got %+v", cfgs)
+	}
+}
+
+func TestBuildConfigs_SSDefaultMethod(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t", Protocols: []string{"shadowsocks"}}
+	cfgs := g.BuildConfigs(realm, "seed-uuid")
+	if len(cfgs) != 1 || cfgs[0].Method != "aes-128-gcm" {
+		t.Errorf("ss method 空时应默认 aes-128-gcm; got %+v", cfgs)
+	}
+}
+
+func TestBuildConfigs_CertInjectionHy2Tuic(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "iptv.local.crt")
+	keyPath := filepath.Join(dir, "iptv.local.key")
+	if err := os.WriteFile(certPath, []byte("CERT-PEM"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("KEY-PEM"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	g := NewRealmGenerator(certPath, keyPath)
+	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t", Protocols: []string{"hysteria2", "tuic", "reality"}}
+	byProto := Config2(g.BuildConfigs(realm, "seed-uuid"))
+	// hy2/tuic 外层 TLS 用稳定证书。
+	if byProto["hysteria2"].CertPEM != "CERT-PEM" || byProto["hysteria2"].KeyPEM != "KEY-PEM" {
+		t.Errorf("hy2 落盘证书 PEM 应注入; got %+v", byProto["hysteria2"])
+	}
+	if byProto["tuic"].CertPEM != "CERT-PEM" {
+		t.Errorf("tuic 落盘证书 PEM 应注入")
+	}
+	// reality 用洞内 WrapTLS 自签，不注入外层证书。
+	if byProto["reality"].CertPEM != "" {
+		t.Errorf("reality 不应注入外层稳定证书（洞内 WrapTLS 自签）")
+	}
+}
+
+func TestLocalPort(t *testing.T) {
+	want := map[string]int{
+		"hysteria2": 51820, "tuic": 51821, "reality": 51822,
+		"trojan": 51823, "shadowsocks": 51824, "vmess": 51825, "bogus": 0,
+	}
+	for proto, port := range want {
+		if got := LocalPort(proto); got != port {
+			t.Errorf("LocalPort(%q) = %d, want %d", proto, got, port)
+		}
+	}
+}
+
+func TestDeriveRealmID(t *testing.T) {
+	cases := map[string]string{
+		"hysteria2": "base-hy2", "shadowsocks": "base-ss",
+		"tuic": "base-tuic", "reality": "base-reality",
+		"trojan": "base-trojan", "vmess": "base-vmess",
+	}
+	for proto, want := range cases {
+		if got := DeriveRealmID("base", proto); got != want {
+			t.Errorf("DeriveRealmID(base, %q) = %q, want %q", proto, got, want)
+		}
+	}
+}
+
+// Config2 indexes egress configs by protocol for assertions.
+func Config2(cfgs []egressConfig) map[string]egressConfig {
+	m := make(map[string]egressConfig, len(cfgs))
+	for _, c := range cfgs {
+		m[c.Protocol] = c
+	}
+	return m
+}
+
+func assertRealmID(t *testing.T, byProto map[string]egressConfig, proto, want string) {
+	t.Helper()
+	if got := byProto[proto].RealmID; got != want {
+		t.Errorf("%s realm_id = %q, want %q", proto, got, want)
+	}
+}
+
+func TestBuildConfigs_SeedCredentials(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t",
+		Protocols: []string{"hysteria2", "tuic", "reality", "trojan", "shadowsocks", "vmess"}}
+	byProto := Config2(g.BuildConfigs(realm, "seed-uuid-123"))
+	// tuic/reality/vmess need a Config.UUID seed (egress.New requires non-empty UUID).
+	for _, proto := range []string{"tuic", "reality", "vmess"} {
+		if byProto[proto].UUID != "seed-uuid-123" {
+			t.Errorf("%s Config.UUID should carry seed; got %q", proto, byProto[proto].UUID)
+		}
+	}
+	// hy2/tuic/trojan/ss need a Config.Password seed (egress.New seeds a user).
+	for _, proto := range []string{"hysteria2", "tuic", "trojan", "shadowsocks"} {
+		if byProto[proto].Password != "seed-uuid-123" {
+			t.Errorf("%s Config.Password should carry seed; got %q", proto, byProto[proto].Password)
+		}
+	}
+	// hy2 doesn't need a Config.UUID seed.
+	if byProto["hysteria2"].UUID != "" {
+		t.Errorf("hy2 should not need a seed UUID; got %q", byProto["hysteria2"].UUID)
+	}
+}
+
+func TestBuildConfigs_EmptySeedFallsBackPlaceholder(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t", Protocols: []string{"tuic"}}
+	byProto := Config2(g.BuildConfigs(realm, ""))
+	if byProto["tuic"].UUID != placeholderUUID {
+		t.Errorf("empty seed should fall back to placeholder UUID; got %q", byProto["tuic"].UUID)
+	}
+}
+
+func TestSeedUUID(t *testing.T) {
+	users := []User{{UUID: "off", Enabled: false}, {UUID: "on-1", Enabled: true}, {UUID: "on-2", Enabled: true}}
+	if got := SeedUUID(users); got != "on-1" {
+		t.Errorf("SeedUUID should return first enabled uuid; got %q", got)
+	}
+	if got := SeedUUID([]User{{UUID: "x", Enabled: false}}); got != "" {
+		t.Errorf("no enabled users → empty seed; got %q", got)
 	}
 }

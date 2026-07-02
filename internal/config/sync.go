@@ -30,30 +30,36 @@ func NewSyncer(apiURL, apiKey string) *Syncer {
 }
 
 // RegisterRequest 节点注册请求。realm 出口不靠 IP，靠 node_id+api_key（§5.1）。
+// ★六协议实况上报（总设计 §6 / 施工单 §3.6）：Protocols 字段带"实际启用协议 → 本地端口"，
+// 供 manager 存/运维查这节点跑了哪些协议、端口多少（端口对外无意义、只作运维可见性）。
 type RegisterRequest struct {
 	NodeID    string         `json:"node_id"`
 	Version   string         `json:"version"`
 	NodeKind  string         `json:"node_kind"`        // "realm"，便于 manager 走 realm 分支
-	RealmID   string         `json:"realm_id"`         // 出口的 realm slot 标识
+	RealmID   string         `json:"realm_id"`         // 出口的 realm slot 标识（base）
 	Region    string         `json:"region,omitempty"` // 首启引导值，空则后端 GeoIP 判定
-	Protocols map[string]any `json:"protocols"`        // 只有一个 hy2+realm inbound
+	Protocols map[string]any `json:"protocols"`        // 实况：{ "<proto>": {"port": <localPort>} }
 }
 
-// Register 向 manager 注册 realm 出口。
-func (s *Syncer) Register(nodeID, realmID, region string, hy2Port int) error {
+// Register 向 manager 注册 realm 出口，上报实际启用协议 + 各本地端口。
+// protocols 为空（首启还没起 node）时上报空实况，manager 侧照常记录节点存在。
+func (s *Syncer) Register(nodeID, realmID, region string, protocols []string) error {
 	url := fmt.Sprintf("%s/api/node/register", s.apiURL)
 
+	protoMap := make(map[string]any, len(protocols))
+	for _, proto := range protocols {
+		protoMap[proto] = map[string]any{
+			"port": LocalPort(proto),
+		}
+	}
+
 	req := RegisterRequest{
-		NodeID:   nodeID,
-		Version:  "1.0.0",
-		NodeKind: "realm",
-		RealmID:  realmID,
-		Region:   region,
-		Protocols: map[string]any{
-			"hysteria2_realm": map[string]any{
-				"port": hy2Port,
-			},
-		},
+		NodeID:    nodeID,
+		Version:   "2.0.0",
+		NodeKind:  "realm",
+		RealmID:   realmID,
+		Region:    region,
+		Protocols: protoMap,
 	}
 
 	return s.postJSON(url, req, nil)

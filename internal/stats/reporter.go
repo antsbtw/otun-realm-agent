@@ -19,6 +19,13 @@ type StatsEntry struct {
 	Download int64  `json:"download"`
 }
 
+// UserStats 用户流量统计（原 stats/collector.go；collector 已随 egress 库化删除，
+// 类型保留在此供 Reporter 消费。字节数由 egress 库 CollectStats 提供）。
+type UserStats struct {
+	Upload   int64
+	Download int64
+}
+
 // StatsReport 统计上报数据（计费通路 → manager /api/node/stats）。
 type StatsReport struct {
 	Timestamp time.Time    `json:"timestamp"`
