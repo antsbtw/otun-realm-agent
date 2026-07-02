@@ -2,7 +2,7 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20260702011601-729115ffff59 // pin: branch feat/r2a-user-attribution f
+require github.com/antsbtw/otun-s-egress v0.0.0-20260702094200-86d87f14d4e5 // pin: branch feat/r2a-user-attribution f
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
@@ -60,10 +60,8 @@ require (
 	golang.org/x/tools v0.45.0 // indirect
 )
 
-// NOTE(build-task 8): egress lib lives on branch feat/r2a-user-attribution
-// (commit 729115f), not yet merged to main and not reachable via GOPROXY in this
-// environment. The require line records the intended pin; this replace points at
-// the local checkout of that exact commit so build/test/vet resolve offline.
-// Remove the replace (and run `go get github.com/antsbtw/otun-s-egress@729115f`,
-// or @latest once merged to main) when the repo is reachable from CI.
-replace github.com/antsbtw/otun-s-egress => /tmp/otun-s-egress
+// NOTE: egress lib pinned to commit 86d87f1 on branch feat/r2a-user-attribution
+// (C.1/C.2 shared meter Registry across six nodes — required by cmd/agent). Repo is
+// public and this commit is reachable via GOPROXY, so NO local replace is needed
+// (CI resolves it directly). Bump with `go get github.com/antsbtw/otun-s-egress@<sha>`
+// when the egress lib advances; do NOT re-add `replace => /tmp/...` (breaks CI).
