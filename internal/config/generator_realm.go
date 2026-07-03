@@ -112,6 +112,8 @@ func (g *RealmGenerator) BuildConfigs(realm *RealmBlock, seedUUID string) []egre
 			STUNServers: realm.StunServers,                   // 域名/IP 原样透传（真机已验证域名可用）
 			SNI:         sni,
 			ALPN:        []string{"h3"},
+			// 会合面自签证书（纯 IP 部署）时跳过 TLS 校验；仅控制通道，不碰数据面隧道 TLS。
+			RendezvousInsecureTLS: realm.RendezvousInsecure,
 		}
 
 		switch proto {

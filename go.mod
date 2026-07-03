@@ -2,7 +2,7 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20260702094200-86d87f14d4e5 // pin: branch feat/r2a-user-attribution f
+require github.com/antsbtw/otun-s-egress v0.0.0-20260703100908-20292c50775d // pin: branch feat/r2a-user-attribution f
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect

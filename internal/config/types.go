@@ -71,6 +71,9 @@ type RealmBlock struct {
 	Token       string   `json:"token"`        // ★会合面 token（一 token 多 realm_id）
 	StunServers []string `json:"stun_servers"` // 坑#2：必须 IP 不能域名
 	SNI         string   `json:"sni"`          // 默认 iptv.local
+	// 会合面用自签证书（纯 IP 部署、无公网 CA）时置 true，出口跳过会合面 TLS 证书校验。
+	// 仅控制通道，不影响打洞数据面隧道 TLS。透传到 egress.Config.RendezvousInsecureTLS。
+	RendezvousInsecure bool `json:"rendezvous_insecure,omitempty"`
 
 	// —— 启用哪些协议（★核心：manager 只管这个，不管端口）——
 	Protocols []string `json:"protocols"` // 如 ["hysteria2","reality","tuic",...]
