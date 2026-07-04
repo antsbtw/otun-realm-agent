@@ -100,8 +100,8 @@ DL_BASE="https://situstechnologies.com/dl"
 # 预期 sha256（随脚本走 git = 可信来源；勿与二进制放同目录）。
 # ⚠️ agent tag=latest 滚动：每次 agent 发版，下面 agent-* 的 sha256 需同步更新。
 declare -A DL_SHA256=(
-    [agent-linux-amd64]=b7f73f3d896ec3871713d914e19c0e6b9284698bb2d1c8504f2069751b3c3108
-    [agent-linux-arm64]=1253d844dffbc2e69c2482c85f9fadf21bb0a8e750d43133d0db7acd378ad3e8
+    [agent-linux-amd64]=e2f8ca11090c0747eda63ef1759e9954586b2d486d63a9e320e4bbcfd5357278
+    [agent-linux-arm64]=51cc3e3c7aa29b4212a0782dd10c57186f0f9f8d7e46a190a0e2fe8c0d347ae8
 )
 
 # _verify_sha256 <file> <artifact-name> -> 0 通过 / 1 不过（无预期值时跳过校验、视为通过）
