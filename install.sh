@@ -40,6 +40,9 @@ apt-get install -y -qq curl
 NODE_API_KEY=""
 NODE_ID="realm-$(hostname)"
 API_URL="https://otun-manager-v3.situstechnologies.com"
+# ★Batch 5：fleet-manager 地址（纳管 register/heartbeat 直连 fleet）。
+# 默认空 → agent 侧 NewSyncer 回退用 OTUN_API_URL（不传 --fleet-url = 旧行为，register/heartbeat 仍打 otun，零回归）。
+FLEET_URL=""
 REALM_ID=""
 REGION=""
 OBS_ENDPOINT=""
@@ -53,6 +56,7 @@ while [[ $# -gt 0 ]]; do
         --api-key)      NODE_API_KEY="$2"; shift 2 ;;
         --node-id)      NODE_ID="$2"; shift 2 ;;
         --api-url)      API_URL="$2"; shift 2 ;;
+        --fleet-url)    FLEET_URL="$2"; shift 2 ;;
         --realm-id)     REALM_ID="$2"; shift 2 ;;
         --region)       REGION="$2"; shift 2 ;;
         --obs-endpoint) OBS_ENDPOINT="$2"; shift 2 ;;
@@ -63,7 +67,7 @@ done
 
 if [ -z "$NODE_API_KEY" ]; then
     echo -e "${RED}Error: --api-key is required${NC}"
-    echo "Usage: $0 --api-key <key> --realm-id <id> [--node-id <id>] [--region <r>] [--api-url <url>] [--obs-endpoint <url>]"
+    echo "Usage: $0 --api-key <key> --realm-id <id> [--node-id <id>] [--region <r>] [--api-url <url>] [--fleet-url <url>] [--obs-endpoint <url>]"
     exit 1
 fi
 if [ -z "$REALM_ID" ]; then
@@ -175,6 +179,11 @@ Environment=\"NODE_ID=$NODE_ID\"
 Environment=\"OTUN_API_URL=$API_URL\"
 Environment=\"MANAGEMENT_MODE=remote\"
 Environment=\"REALM_ID=$REALM_ID\""
+# ★Batch 5：仅当传了 --fleet-url 才注入 FLEET_API_URL；不传则不写该 env → agent 回退 OTUN_API_URL（零回归）。
+if [ -n "$FLEET_URL" ]; then
+    ENV_VARS="$ENV_VARS
+Environment=\"FLEET_API_URL=$FLEET_URL\""
+fi
 if [ -n "$REGION" ]; then
     ENV_VARS="$ENV_VARS
 Environment=\"REALM_REGION=$REGION\""

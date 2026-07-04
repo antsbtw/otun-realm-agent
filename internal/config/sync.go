@@ -9,20 +9,28 @@ import (
 	"time"
 )
 
-// Syncer 与 manager 说同一套 /api/node/* 方言（§3：复用力度②）。
-// register / users / stats / heartbeat / connections —— manager 分不清对面是
-// node-agent 还是 realm-agent，照样下发 users[]、收计费 stats、回 kick_users。
+// Syncer 与 manager/fleet 说同一套 /api/node/* 方言（§3：复用力度②）。
+// ★Batch 5 拆两个 URL（渐进迁移，零回归）：
+//   - apiURL   = otun-manager：用户下发拉取（FetchUsers）+ 计费上报（ReportConnections 喂 kick/quota）。
+//   - fleetURL = fleet-manager：节点纳管 register + heartbeat（liveness/实况直连 fleet，§7.1 b）。
+// ★fleetURL 空 → 回退用 apiURL（不传 --fleet-url = 旧行为，register/heartbeat 仍打 otun，零回归）。
+// online 判定共库同一 nodes.last_heartbeat：心跳打到 fleet 后 fleet 写同列 → otun 与 fleet 都读到，不断链。
 type Syncer struct {
-	apiURL     string
+	apiURL     string // otun-manager（用户下发 + 计费）
+	fleetURL   string // fleet-manager（纳管 register/heartbeat）；空则回退 apiURL
 	apiKey     string
 	httpClient *http.Client
 }
 
-// NewSyncer 创建配置同步器。
-func NewSyncer(apiURL, apiKey string) *Syncer {
+// NewSyncer 创建配置同步器。fleetURL 空 → register/heartbeat 回退到 apiURL（向后兼容旧行为）。
+func NewSyncer(apiURL, fleetURL, apiKey string) *Syncer {
+	if fleetURL == "" {
+		fleetURL = apiURL // ★渐进迁移零回归：不配 fleet 则纳管仍走 otun-manager（旧路径）。
+	}
 	return &Syncer{
-		apiURL: apiURL,
-		apiKey: apiKey,
+		apiURL:   apiURL,
+		fleetURL: fleetURL,
+		apiKey:   apiKey,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -44,7 +52,8 @@ type RegisterRequest struct {
 // Register 向 manager 注册 realm 出口，上报实际启用协议 + 各本地端口。
 // protocols 为空（首启还没起 node）时上报空实况，manager 侧照常记录节点存在。
 func (s *Syncer) Register(nodeID, realmID, region string, protocols []string) error {
-	url := fmt.Sprintf("%s/api/node/register", s.apiURL)
+	// ★Batch 5：注册纳管直连 fleet（fleetURL；空则回退 apiURL=otun，零回归）。
+	url := fmt.Sprintf("%s/api/node/register", s.fleetURL)
 
 	protoMap := make(map[string]any, len(protocols))
 	for _, proto := range protocols {
@@ -96,9 +105,11 @@ func (s *Syncer) FetchUsers() (*UsersResponse, error) {
 	return &result, nil
 }
 
-// Heartbeat 发送心跳（计费通路）。
+// Heartbeat 发送心跳（liveness/实况通路）。★Batch 5：直连 fleet（fleetURL；空则回退 apiURL，零回归）。
+// ★只搬 liveness：心跳体是节点级 NodeLoad，不含 per-user 计费字节；kick_users 决策仍由 otun 经
+//   ReportConnections 消费（该通路仍指向 apiURL）。fleet 心跳返空 kick_users → agent 无操作，等价旧无 kick。
 func (s *Syncer) Heartbeat(req *HeartbeatRequest) (*HeartbeatResponse, error) {
-	url := fmt.Sprintf("%s/api/node/heartbeat", s.apiURL)
+	url := fmt.Sprintf("%s/api/node/heartbeat", s.fleetURL)
 
 	var resp HeartbeatResponse
 	if err := s.postJSON(url, req, &resp); err != nil {
@@ -107,7 +118,9 @@ func (s *Syncer) Heartbeat(req *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return &resp, nil
 }
 
-// ReportConnections 上报活跃连接（计费通路）。
+// ReportConnections 上报活跃连接（计费/踢人通路）。★Batch 5【不搬】：仍指向 otun-manager（apiURL）。
+// 原因：otun 的 /api/node/connections 消费 per-conn 数据做 kick 决策（设备指纹/过期/配额超限），
+// 属计费/enforcement 消费逻辑；搬到 fleet 需在 fleet 复刻用户查库+kick 逻辑，本 Batch 不搬（宁可少搬别搬断计费）。
 func (s *Syncer) ReportConnections(report *ConnectionsReport) (*HeartbeatResponse, error) {
 	url := fmt.Sprintf("%s/api/node/connections", s.apiURL)
 

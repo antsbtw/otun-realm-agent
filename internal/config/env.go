@@ -11,9 +11,10 @@ import (
 //
 //	--realm-id → REALM_ID（base，各协议派生 <base>-<proto>）
 //	--region   → REALM_REGION
-//	--node-id  → NODE_ID
-//	--api-url  → OTUN_API_URL
-//	--api-key  → NODE_API_KEY
+//	--node-id   → NODE_ID
+//	--api-url   → OTUN_API_URL（用户下发 + 计费）
+//	--fleet-url → FLEET_API_URL（★Batch 5：纳管 register/heartbeat 直连 fleet；空则回退 --api-url）
+//	--api-key   → NODE_API_KEY
 //	并固定 MANAGEMENT_MODE=remote（realm-agent 无本地/混合模式）。
 //
 // egress 库化 + 六协议后删除的 env：
@@ -24,7 +25,10 @@ import (
 //   - REALM_SERVER_URL：会合面 URL 由 manager 下发，不本地写死。
 func LoadFromEnv() *AgentConfig {
 	return &AgentConfig{
-		APIURL:        getEnv("OTUN_API_URL", "https://otun-manager-v3.situstechnologies.com"),
+		APIURL: getEnv("OTUN_API_URL", "https://otun-manager-v3.situstechnologies.com"),
+		// ★Batch 5：--fleet-url → FLEET_API_URL（纳管 register/heartbeat 直连 fleet）。
+		// 默认空 → NewSyncer 回退用 OTUN_API_URL（不配 fleet = 旧行为，register/heartbeat 仍打 otun，零回归）。
+		FleetURL:      getEnv("FLEET_API_URL", ""),
 		NodeAPIKey:    getEnv("NODE_API_KEY", ""),
 		NodeID:        getEnv("NODE_ID", "realm-default"),
 		SyncInterval:  getDurationEnv("SYNC_INTERVAL", 60) * time.Second,

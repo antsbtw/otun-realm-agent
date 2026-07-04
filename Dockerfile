@@ -20,6 +20,7 @@ RUN mkdir -p /app/data
 COPY --from=builder /agent /app/agent
 
 ENV OTUN_API_URL=https://otun-manager-v3.situstechnologies.com \
+    FLEET_API_URL="" \
     NODE_API_KEY="" \
     NODE_ID="realm-default" \
     MANAGEMENT_MODE=remote \

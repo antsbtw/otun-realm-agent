@@ -11,7 +11,8 @@ import "time"
 //     启用哪些协议由 manager 下发的 RealmBlock.Protocols 决定，不再是单协议入口。
 //   - RealmServerURL：会合面 URL 由 manager 下发（RealmBlock.ServerURL），不本地写死。
 type AgentConfig struct {
-	APIURL        string // manager 地址
+	APIURL        string // otun-manager 地址（用户下发 FetchUsers + 计费 ReportConnections/stats）
+	FleetURL      string // ★Batch 5：fleet-manager 地址（纳管 register/heartbeat）；空则回退 APIURL（零回归）
 	NodeAPIKey    string // 出口身份 api-key（§5.1：不靠 IP，靠 node_id+api_key）
 	NodeID        string // 出口 node_id，如 realm-cn-sh-01
 	SyncInterval  time.Duration

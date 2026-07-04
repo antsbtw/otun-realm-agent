@@ -157,7 +157,9 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 
 	agent := &Agent{
 		cfg:          cfg,
-		syncer:       config.NewSyncer(cfg.APIURL, cfg.NodeAPIKey),
+		// ★Batch 5：Syncer 拆 URL——register/heartbeat 走 FleetURL（空则回退 APIURL），
+		//   FetchUsers/ReportConnections 仍走 APIURL（otun）。billReporter（计费 stats）不动，仍 APIURL。
+		syncer:       config.NewSyncer(cfg.APIURL, cfg.FleetURL, cfg.NodeAPIKey),
 		cache:        config.NewCache(dataDir),
 		selfsign:     selfsign,
 		generator:    config.NewRealmGenerator(selfsign.CertPath(), selfsign.KeyPath()),
