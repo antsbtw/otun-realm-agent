@@ -59,7 +59,8 @@ type Agent struct {
 
 	// realm 重注册（§7.9）。
 	registrar   *realm.Registrar
-	reloadCount int // rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
+	reloadCount             int // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
+	lastReportedReloadCount int // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
 
 	dataDir             string
 	currentVersion      string             // 顶层合并 version（老 manager 无双 version 时用它判定）
@@ -896,8 +897,11 @@ func (a *Agent) realmReconcile() {
 		serverURL = realmBlock.ServerURL
 	}
 
+	// rendezvous_insecure：自签会合面探测须跳过证书验证（否则假报不可达）。
+	insecure := realmBlock != nil && realmBlock.RendezvousInsecure
+
 	// §7.9.4 分支 (b) 基线：只探 L3 可达，假定库自带重注册（registeredSelf=true）。
-	decision := a.registrar.Evaluate(serverURL, true)
+	decision := a.registrar.Evaluate(serverURL, true, insecure)
 
 	if decision.NeedReload && a.isNodeRunning() {
 		log.Printf("[realm] %s → rebuild nodes to re-register", decision.Reason)
@@ -912,11 +916,18 @@ func (a *Agent) realmReconcile() {
 		}
 	}
 
+	// ★ReloadCount 上报【本窗口增量】而非累积值（否则面板把恒定累积值误读成"每窗都在 reload"）。
+	// 增量 = 本次累积 - 上次上报时的基线；上报后更新基线。稳态(不 rebuild)→增量恒 0。
+	a.mu.Lock()
+	reloadDelta := a.reloadCount - a.lastReportedReloadCount
+	a.lastReportedReloadCount = a.reloadCount
+	a.mu.Unlock()
+
 	a.obsReporter.Enqueue(obs.SchemaRealmHealth, obs.RealmHealthPayload{
 		WindowSec:    int(a.cfg.RealmInterval.Seconds()),
 		L3Reachable:  decision.Reachable,
 		L3ProbeRTTMs: decision.ProbeRTTMs,
-		ReloadCount:  a.reloadCount,
+		ReloadCount:  reloadDelta,
 		ServerURL:    serverURL,
 	})
 }

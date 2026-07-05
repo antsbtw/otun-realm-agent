@@ -8,6 +8,7 @@
 package realm
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,7 +19,8 @@ import (
 
 // Registrar 负责 L3 可达性探测与按需重注册。
 type Registrar struct {
-	httpClient *http.Client
+	httpClient         *http.Client // 验证证书(正式证会合面，如 situstechnologies.com/realm)
+	httpClientInsecure *http.Client // 跳过证书验证(自签证会合面，rendezvous_insecure=true 的 IP:port)
 
 	mu             sync.Mutex
 	lastReachable  bool
@@ -27,11 +29,19 @@ type Registrar struct {
 
 // NewRegistrar 创建重注册器。
 func NewRegistrar() *Registrar {
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Registrar{
 		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
-			// 不跟随重定向：只关心 L3 端点是否在线。
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Timeout:       5 * time.Second,
+			CheckRedirect: noRedirect, // 不跟随重定向：只关心 L3 端点是否在线。
+		},
+		// ★自签证会合面探测用：rendezvous_insecure=true 时会合面是自签 TLS(如 otun-s-test 的
+		// https://<ip>:9443)，验证证书必失败→假报 l3_reachable=false。真实 realm 连接本就 insecure，
+		// 故探测也须 skip verify，否则 obs 对自签会合面的出口(de-01 类)恒假报不可达。
+		httpClientInsecure: &http.Client{
+			Timeout:       5 * time.Second,
+			CheckRedirect: noRedirect,
+			Transport:     &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 		},
 	}
 }
@@ -43,9 +53,9 @@ type ProbeResult struct {
 }
 
 // ProbeL3 探 server_url 的 L3 可达性（§7.9.3 ①）。
-// 优先 HTTP GET；URL 不可解析或非 http(s) 时退化为 TCP 探端口。
-func (r *Registrar) ProbeL3(serverURL string) ProbeResult {
-	res := r.probeL3(serverURL)
+// insecure=true(rendezvous_insecure)：会合面自签 TLS，探测跳过证书验证(否则假报不可达)。
+func (r *Registrar) ProbeL3(serverURL string, insecure bool) ProbeResult {
+	res := r.probeL3(serverURL, insecure)
 
 	r.mu.Lock()
 	r.lastReachable = res.Reachable
@@ -55,10 +65,10 @@ func (r *Registrar) ProbeL3(serverURL string) ProbeResult {
 	return res
 }
 
-func (r *Registrar) probeL3(serverURL string) ProbeResult {
+func (r *Registrar) probeL3(serverURL string, insecure bool) ProbeResult {
 	u, err := url.Parse(serverURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		// 退化为 TCP 探测（取 host:port，缺端口补 443）。
+		// 退化为 TCP 探测（取 host:port，缺端口补 443）。TCP 探不涉证书，insecure 无关。
 		return r.tcpProbe(hostPortFromURL(serverURL))
 	}
 
@@ -67,7 +77,12 @@ func (r *Registrar) probeL3(serverURL string) ProbeResult {
 	if err != nil {
 		return ProbeResult{Reachable: false}
 	}
-	resp, err := r.httpClient.Do(req)
+	// ★自签会合面(insecure)用 skip-verify 客户端，否则证书验证失败→假报不可达。
+	client := r.httpClient
+	if insecure {
+		client = r.httpClientInsecure
+	}
+	resp, err := client.Do(req)
 	rtt := time.Since(start).Milliseconds()
 	if err != nil {
 		return ProbeResult{Reachable: false, RTTMs: rtt}
@@ -114,8 +129,8 @@ type Decision struct {
 //   - L3 不可达 → 不 reload（reload 也连不上，等 L3 回来）。
 //   - L3 可达 but 查不到自己（注册掉了/端口漂移失效）→ reload 触发重注册。
 //   - L3 可达且注册有效 → 什么都不做（★绝不无脑 reload，保护活跃连接）。
-func (r *Registrar) Evaluate(serverURL string, registeredSelf bool) Decision {
-	res := r.ProbeL3(serverURL)
+func (r *Registrar) Evaluate(serverURL string, registeredSelf bool, insecure bool) Decision {
+	res := r.ProbeL3(serverURL, insecure)
 
 	switch {
 	case !res.Reachable:
