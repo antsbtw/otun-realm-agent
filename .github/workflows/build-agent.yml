@@ -32,6 +32,9 @@ jobs:
         run: go vet -tags with_utls ./...
       - name: Test
         run: go test -tags with_utls ./...
+      - name: Updater scenario tests
+        # U3：updater.sh 的 7 场景 mock 测试台（mock fleet + 内容感知 mock systemctl）。
+        run: bash test/updater_test.sh
 
   build:
     needs: test
@@ -73,6 +76,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        # U3：updater.sh 也进 manifest + /dl/（节点升级执行器，随发版同步分发）。
+        uses: actions/checkout@v4
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -81,13 +87,15 @@ jobs:
         run: |
           sha_amd64=$(sha256sum artifacts/agent-linux-amd64/agent-linux-amd64 | cut -d' ' -f1)
           sha_arm64=$(sha256sum artifacts/agent-linux-arm64/agent-linux-arm64 | cut -d' ' -f1)
+          sha_updater=$(sha256sum updater.sh | cut -d' ' -f1)
           cat > manifest.json << EOF
           {
             "version": "${{ github.sha }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "artifacts": {
               "linux-amd64": {"file": "agent-linux-amd64", "sha256": "${sha_amd64}"},
-              "linux-arm64": {"file": "agent-linux-arm64", "sha256": "${sha_arm64}"}
+              "linux-arm64": {"file": "agent-linux-arm64", "sha256": "${sha_arm64}"},
+              "updater": {"file": "updater.sh", "sha256": "${sha_updater}"}
             }
           }
           EOF
@@ -96,7 +104,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: manifest
-          path: manifest.json
+          path: |
+            manifest.json
+            updater.sh
 
   release:
     needs: build
@@ -130,13 +140,13 @@ jobs:
         with:
           path: artifacts
       - name: Prepare release files
-        # manifest.json 一并挂到 latest release：GitHub 兜底层也能拉到校验真源
-        # （install.sh 拉 /dl/manifest.json 失败时回退这里）。
+        # manifest.json + updater.sh 一并挂到 latest release：GitHub 兜底层也能拉到
+        # 校验真源与升级执行器（install.sh 拉 /dl/ 失败时回退这里）。
         run: |
           mkdir -p release
           find artifacts -type f -name 'agent-*' -exec mv {} release/ \;
           chmod +x release/*
-          mv artifacts/manifest/manifest.json release/
+          mv artifacts/manifest/manifest.json artifacts/manifest/updater.sh release/
           ls -la release/
       - name: Update latest release
         uses: softprops/action-gh-release@v1
@@ -187,7 +197,7 @@ jobs:
           # situs-web (13.214.21.114) ed25519 host key，钉死防 MITM
           echo "$DL_HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBb/G7x+kYre8c4Hf59E/rSgPuuv4zBwiaRQGt2OHLFW" > ~/.ssh/dl_known_hosts
 
-          find artifacts -type f \( -name 'agent-*' -o -name 'manifest.json' \) -exec mv {} dist/ \;
+          find artifacts -type f \( -name 'agent-*' -o -name 'manifest.json' -o -name 'updater.sh' \) -exec mv {} dist/ \;
           ls -la dist/
 
           publish() {
@@ -201,9 +211,10 @@ jobs:
                 -o IdentitiesOnly=yes \
                 "$DL_USER@$DL_HOST" "put $name $sha" < "dist/$name"
           }
-          # 二进制先、manifest 最后（见上方安全模型注释）
+          # 二进制先、manifest 最后（见上方安全模型注释）；updater.sh 在 manifest 前。
           publish agent-linux-amd64
           publish agent-linux-arm64
+          publish updater.sh
           publish manifest.json
 
       - name: Verify /dl/ serves the new manifest

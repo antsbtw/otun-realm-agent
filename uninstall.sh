@@ -16,7 +16,13 @@ systemctl stop otun-realm-agent 2>/dev/null || true
 systemctl disable otun-realm-agent 2>/dev/null || true
 pkill -9 otun-realm-agent 2>/dev/null || true
 
+# updater timer（U3）一并卸（R2：只卸 agent 自己的东西，绝不碰 cloudflared/ssh）。
+systemctl stop otun-agent-updater.timer 2>/dev/null || true
+systemctl disable otun-agent-updater.timer 2>/dev/null || true
+
 rm -f /etc/systemd/system/otun-realm-agent.service
+rm -f /etc/systemd/system/otun-agent-updater.service
+rm -f /etc/systemd/system/otun-agent-updater.timer
 rm -f /usr/local/bin/realm
 systemctl daemon-reload
 

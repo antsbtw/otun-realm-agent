@@ -122,7 +122,7 @@ _load_manifest() {
     local flat name sha
     flat=$(tr -d ' \t\n' < "$tmp")
     rm -f "$tmp"
-    for name in agent-linux-amd64 agent-linux-arm64; do
+    for name in agent-linux-amd64 agent-linux-arm64 updater.sh; do
         sha=$(printf '%s' "$flat" | sed -n 's/.*"file":"'"$name"'","sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
         [ -n "$sha" ] && DL_SHA256[$name]="$sha"
     done
@@ -199,6 +199,17 @@ chmod +x "$INSTALL_DIR/agent"
 # 六协议本地 UDP 端口均 > 1024，无需 CAP_NET_BIND_SERVICE。
 echo -e "${GREEN}Agent ready${NC}"
 
+# ============ updater（U3）：独立 systemd timer 自动升级 ============
+# ★独立于 agent（agent 不能替换正在运行的自己；agent 挂了 timer 能救它）。
+# unit 文件由 updater.sh --install 自己写（单一真源，本脚本不抄一遍——slot 短名跨仓
+# 双写的教训）。拿不到 updater 不阻断装机：agent 照常服务，之后可单独 bootstrap。
+echo -e "${GREEN}Installing agent updater (self-upgrade timer)...${NC}"
+if fetch_binary "updater.sh" "$GH_LATEST/updater.sh" "$INSTALL_DIR/updater.sh"; then
+    chmod +x "$INSTALL_DIR/updater.sh"
+else
+    echo -e "${YELLOW}updater.sh unavailable from /dl/ and GitHub — skipping (agent unaffected; bootstrap later)${NC}"
+fi
+
 # ============ systemd 服务（六协议 env；固定 MANAGEMENT_MODE=remote）============
 # ★去掉 HY2_PORT / REALM_SERVER_URL / 旧引擎相关 env：端口是 agent 本地常量，server_url 由
 #   manager 下发，六协议引擎内嵌无需外部代理二进制。
@@ -250,6 +261,11 @@ SYSTEMD
 systemctl daemon-reload
 systemctl enable otun-realm-agent
 systemctl start otun-realm-agent
+
+# updater timer（agent unit 写好后再装：updater 运行期从 agent unit 读 api_key/fleet url）。
+if [ -x "$INSTALL_DIR/updater.sh" ]; then
+    "$INSTALL_DIR/updater.sh" --install
+fi
 
 # 管理命令
 cat > /usr/local/bin/realm << 'CMD'
