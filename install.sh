@@ -196,12 +196,21 @@ fi
 cat > /etc/systemd/system/otun-realm-agent.service << SYSTEMD
 [Unit]
 Description=OTun Realm Agent (six-protocol egress)
-After=network.target
+# ★DNS 就绪后再启动。根因：agent 启动即做 manager sync + STUN 域名解析（会合面注册
+# 依赖）。开机时若网络/DHCP 未就绪、resolv.conf 未写好 → Go 解析器 fallback [::1]:53
+# → connection refused → STUN 域名解析失败 → 会合面注册发不出且不自愈 → 永久卡死。
+# 不同网络环境 DHCP/DNS 就绪时间不同，故不赌 systemd target（本机 networkd/resolved
+# 均未启用，network-online/nss-lookup 可能空转过早 active）。改用 ExecStartPre 主动
+# 探测：循环 getent 解析关键域名，能解析（DNS 真正可用）才放行 agent。环境无关、鲁棒。
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 $ENV_VARS
+# 启动前等 DNS 真正可解析（最多 120s，超时也放行，交由 agent 自身重试兜底）。
+ExecStartPre=/bin/sh -c 'i=0; until getent hosts otun-manager-v3.situstechnologies.com >/dev/null 2>&1 || [ \$i -ge 120 ]; do i=\$((i+1)); sleep 1; done'
 ExecStart=$INSTALL_DIR/agent
 Restart=always
 RestartSec=5

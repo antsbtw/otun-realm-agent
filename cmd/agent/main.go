@@ -900,8 +900,38 @@ func (a *Agent) realmReconcile() {
 	// rendezvous_insecure：自签会合面探测须跳过证书验证（否则假报不可达）。
 	insecure := realmBlock != nil && realmBlock.RendezvousInsecure
 
-	// §7.9.4 分支 (b) 基线：只探 L3 可达，假定库自带重注册（registeredSelf=true）。
-	decision := a.registrar.Evaluate(serverURL, true, insecure)
+	// §7.9.4 分支 (a)：真实逐 slot 自检（otun-s GET /v1/{slot}/status，阶段 1a 端点）。
+	// 只在有 node 在跑时探测——没起 node 本就没注册，rebuild 归 sync 路径管；
+	// ProbeRegistered 是 fail-safe 的：老会合面（无 /status）/网络错 → 视为已注册，
+	// 行为与"写死 true"的旧基线一致。
+	registeredSelf := true
+	var unregSlots []string
+	if realmBlock != nil && serverURL != "" && a.isNodeRunning() {
+		protos := a.snapshotProtocols()
+		slots := make([]string, 0, len(protos))
+		for _, proto := range protos {
+			slots = append(slots, config.DeriveRealmID(realmBlock.RealmID, proto))
+		}
+		registeredSelf, unregSlots = a.registrar.ProbeRegistered(serverURL, realmBlock.Token, slots, insecure)
+	}
+
+	decision := a.registrar.Evaluate(serverURL, registeredSelf, insecure)
+
+	// ★连续 RebuildConfirmTicks 个 tick 确认才 rebuild：单次未注册可能撞上库自身
+	// 秒级 re-register 的瞬间（会合面重启后 event-stream 断线重连），误 rebuild 白断
+	// 在线隧道。连续两窗仍未注册才认定库自愈失败。
+	if decision.NeedReload {
+		if !a.registrar.ConfirmUnregistered(true) {
+			log.Printf("[realm] slots %v not registered at rendezvous (unconfirmed, recheck in %s before rebuild)",
+				unregSlots, a.cfg.RealmInterval)
+			decision.NeedReload = false
+		} else {
+			log.Printf("[realm] slots %v not registered at rendezvous for %d consecutive ticks → self-heal rebuild",
+				unregSlots, realm.RebuildConfirmTicks)
+		}
+	} else {
+		a.registrar.ConfirmUnregistered(false)
+	}
 
 	if decision.NeedReload && a.isNodeRunning() {
 		log.Printf("[realm] %s → rebuild nodes to re-register", decision.Reason)

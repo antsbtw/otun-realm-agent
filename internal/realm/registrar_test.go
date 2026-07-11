@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +64,151 @@ func TestInsecureClientSkipsVerify(t *testing.T) {
 		}
 	}
 	_ = tls.Config{}
+}
+
+// statusServer 模拟 otun-s 的 GET /v1/{slot}/status 端点（阶段 1a）。
+// perSlot: slot → registered；不在表里的 slot 返回 404（模拟老会合面/未知 slot）。
+// wantToken 非空时校验 Bearer，不符返 401。
+func statusServer(t *testing.T, wantToken string, perSlot map[string]bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if wantToken != "" && r.Header.Get("Authorization") != "Bearer "+wantToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"invalid_token"}`))
+			return
+		}
+		// 路径形如 /v1/{slot}/status
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 3 || parts[0] != "v1" || parts[2] != "status" {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"not_found"}`))
+			return
+		}
+		registered, known := perSlot[parts[1]]
+		if !known {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"not_found","message":"unknown path"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if registered {
+			w.Write([]byte(`{"registered":true}`))
+		} else {
+			w.Write([]byte(`{"registered":false}`))
+		}
+	}))
+}
+
+func TestProbeRegistered_AllRegistered(t *testing.T) {
+	srv := statusServer(t, "tok", map[string]bool{"base-hy2": true, "base-reality": true})
+	defer srv.Close()
+	r := NewRegistrar()
+	ok, unreg := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2", "base-reality"}, false)
+	if !ok || len(unreg) != 0 {
+		t.Fatalf("want all registered, got ok=%v unreg=%v", ok, unreg)
+	}
+}
+
+func TestProbeRegistered_OneSlotLost(t *testing.T) {
+	srv := statusServer(t, "tok", map[string]bool{"base-hy2": true, "base-tuic": false})
+	defer srv.Close()
+	r := NewRegistrar()
+	ok, unreg := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2", "base-tuic"}, false)
+	if ok {
+		t.Fatal("one slot conclusively unregistered → registeredSelf must be false")
+	}
+	if len(unreg) != 1 || unreg[0] != "base-tuic" {
+		t.Fatalf("unreg=%v want [base-tuic]", unreg)
+	}
+}
+
+// ★fail-safe 核心：老会合面（无 /status 端点，404）、鉴权失败、网络错都不得判未注册
+// ——否则 agent 先于会合面升级部署会陷入 rebuild 风暴断在线用户。
+func TestProbeRegistered_FailSafeUnknown(t *testing.T) {
+	r := NewRegistrar()
+
+	// 老会合面：所有 slot 404。
+	oldSrv := statusServer(t, "", map[string]bool{})
+	ok, unreg := r.ProbeRegistered(oldSrv.URL, "tok", []string{"base-hy2"}, false)
+	oldSrv.Close()
+	if !ok || len(unreg) != 0 {
+		t.Fatalf("404 (old rendezvous) must be fail-safe registered, got ok=%v unreg=%v", ok, unreg)
+	}
+
+	// 错 token → 401：未知，不判未注册。
+	authSrv := statusServer(t, "right-token", map[string]bool{"base-hy2": false})
+	ok, _ = r.ProbeRegistered(authSrv.URL, "wrong-token", []string{"base-hy2"}, false)
+	authSrv.Close()
+	if !ok {
+		t.Fatal("401 must be fail-safe registered")
+	}
+
+	// 网络错（黑洞地址）：未知，不判未注册。
+	ok, _ = r.ProbeRegistered("http://192.0.2.1:9", "tok", []string{"base-hy2"}, false)
+	if !ok {
+		t.Fatal("network error must be fail-safe registered")
+	}
+
+	// 200 但畸形 JSON：未知，不判未注册。
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`not json`))
+	}))
+	ok, _ = r.ProbeRegistered(badSrv.URL, "tok", []string{"base-hy2"}, false)
+	badSrv.Close()
+	if !ok {
+		t.Fatal("malformed body must be fail-safe registered")
+	}
+
+	// 空入参：无从探测，按已注册。
+	if ok, _ := r.ProbeRegistered("", "tok", []string{"x"}, false); !ok {
+		t.Fatal("empty serverURL must be fail-safe registered")
+	}
+	if ok, _ := r.ProbeRegistered("http://127.0.0.1:1", "tok", nil, false); !ok {
+		t.Fatal("no slots must be fail-safe registered")
+	}
+}
+
+// 自签会合面（rendezvous_insecure=true）：status 探测同样必须跳过证书验证，
+// 否则对自签面恒探不到（等同 ProbeL3 的老 bug 复刻到新端点）。
+func TestProbeRegistered_SelfSignedRendezvous(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"registered":false}`))
+	}))
+	defer srv.Close()
+	r := NewRegistrar()
+
+	// insecure=false：证书验证失败 → 未知 → fail-safe 已注册。
+	if ok, _ := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2"}, false); !ok {
+		t.Fatal("cert failure must be fail-safe registered")
+	}
+	// insecure=true：探测成功 → 确凿未注册。
+	if ok, _ := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2"}, true); ok {
+		t.Fatal("insecure probe must reach self-signed server and report unregistered")
+	}
+}
+
+func TestConfirmUnregistered_Streak(t *testing.T) {
+	r := NewRegistrar()
+
+	// 第一次未注册：不触发（等确认）。
+	if r.ConfirmUnregistered(true) {
+		t.Fatal("first unregistered tick must not trigger rebuild")
+	}
+	// 连续第二次：触发。
+	if !r.ConfirmUnregistered(true) {
+		t.Fatal("second consecutive unregistered tick must trigger rebuild")
+	}
+	// 触发后清零：再一次未注册又要重新确认。
+	if r.ConfirmUnregistered(true) {
+		t.Fatal("streak must reset after firing")
+	}
+	// 中途恢复注册 → 清零。
+	if r.ConfirmUnregistered(false) {
+		t.Fatal("registered tick must not trigger")
+	}
+	if r.ConfirmUnregistered(true) {
+		t.Fatal("streak must restart after a healthy tick")
+	}
 }
 
 func TestHostPortFromURL(t *testing.T) {

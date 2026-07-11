@@ -9,6 +9,8 @@ package realm
 
 import (
 	"crypto/tls"
+	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,6 +27,7 @@ type Registrar struct {
 	mu             sync.Mutex
 	lastReachable  bool
 	lastProbeRTTMs int64
+	unregStreak    int // 连续探到未注册的 tick 数（ConfirmUnregistered）
 }
 
 // NewRegistrar 创建重注册器。
@@ -143,6 +146,73 @@ func (r *Registrar) Evaluate(serverURL string, registeredSelf bool, insecure boo
 		return Decision{Reachable: true, NeedReload: false,
 			Reason: "registration_healthy_noop", ProbeRTTMs: res.RTTMs}
 	}
+}
+
+// ProbeRegistered 问会合面"这些 slot 现在注册着吗"（otun-s GET /v1/{slot}/status，
+// authUser=realm token，无副作用——绝不用 409 register 探针，那会抢占空槽）。
+//
+// ★fail-safe 语义：只有会合面【确凿返回】200 {"registered": false} 才算未注册。
+// 其余一切——网络错、401、404（老 otun-s 尚无 /status 端点）、非法 JSON——都视为
+// "未知"，按已注册处理。宁可漏探不可误 rebuild（rebuild 断在线隧道），且允许 agent
+// 先于会合面升级部署：老会合面对 /status 返 404 → 行为与本改动前逐字节一致。
+//
+// 返回 (registeredSelf, 确凿未注册的 slot 列表)。
+func (r *Registrar) ProbeRegistered(serverURL, token string, slots []string, insecure bool) (bool, []string) {
+	if serverURL == "" || len(slots) == 0 {
+		return true, nil
+	}
+	client := r.httpClient
+	if insecure {
+		client = r.httpClientInsecure
+	}
+	base := strings.TrimRight(serverURL, "/")
+	var unregistered []string
+	for _, slot := range slots {
+		req, err := http.NewRequest("GET", base+"/v1/"+url.PathEscape(slot)+"/status", nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := client.Do(req)
+		if err != nil {
+			continue // 网络错 = 未知，fail-safe 按已注册
+		}
+		var body struct {
+			Registered *bool `json:"registered"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || decodeErr != nil || body.Registered == nil {
+			continue // 老会合面 404 / 鉴权失败 / 畸形响应 = 未知
+		}
+		if !*body.Registered {
+			unregistered = append(unregistered, slot)
+		}
+	}
+	return len(unregistered) == 0, unregistered
+}
+
+// RebuildConfirmTicks：连续多少个 realm tick 探到未注册才触发 rebuild。
+// =2 的原因：单次未注册可能撞上库自身 re-register 的瞬间（会合面重启后 sing-quic
+// 的 event-stream 断线重连秒级自愈），立刻 rebuild 会白断在线隧道；连续两个 tick
+// （≈2×REALM_INTERVAL）仍未注册才认定"库自愈失败"，交给 rebuild 重跑 STUN。
+const RebuildConfirmTicks = 2
+
+// ConfirmUnregistered 记录一次探测结论，返回"是否已连续 RebuildConfirmTicks 次
+// 未注册、应当 rebuild"。返回 true 时清零计数（rebuild 后重新累计确认窗口）。
+func (r *Registrar) ConfirmUnregistered(unregistered bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !unregistered {
+		r.unregStreak = 0
+		return false
+	}
+	r.unregStreak++
+	if r.unregStreak >= RebuildConfirmTicks {
+		r.unregStreak = 0
+		return true
+	}
+	return false
 }
 
 // hostPortFromURL 从一个不带 scheme 的 server_url 提取 host:port，缺端口补 443。

@@ -112,6 +112,10 @@ func (g *RealmGenerator) BuildConfigs(realm *RealmBlock, seedUUID string) []egre
 			STUNServers: realm.StunServers,                   // 域名/IP 原样透传（真机已验证域名可用）
 			SNI:         sni,
 			ALPN:        []string{"h3"},
+			// ★接会合面注册日志：此前不设 → sing-quic 用 NOP logger → STUN/Register/
+			// event-stream 全过程不可观测。注入后进 journal，便于排障（如开机 DNS 未就绪
+			// 致 STUN 解析失败、注册未发起等）。
+			Logger: realmLogger{},
 			// 会合面自签证书（纯 IP 部署）时跳过 TLS 校验；仅控制通道，不碰数据面隧道 TLS。
 			RendezvousInsecureTLS: realm.RendezvousInsecure,
 		}
