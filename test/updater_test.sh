@@ -78,11 +78,16 @@ printf '{"upgrade":null}' > plan-null.json
 python3 server.py plan.json payload-serve "$PORT" server.log & SRV=$!
 sleep 1
 
+# 两道"真实健康"判据（数据面 UDP 口 / 心跳）在 mock 沙箱里无从满足 —— 默认跳过；
+# 场景 8/9 显式打开来复现 2026-07-11 的事故形状（进程活着但没在工作）。
+SKIP_DP=1
+SKIP_HB=1
 run_updater() { # run_updater <plan-file> <initial-active-state> <crash-marker>
     cp "$1" plan.json; echo "$2" > state; : > mock.log; : > server.log
     MOCK_LOG=$SB/mock.log MOCK_STATE=$SB/state MOCK_AGENT=$SB/opt/agent MOCK_CRASH_MARKER="${3:-NEVER}" \
     UPDATER_INSTALL_DIR=$SB/opt UPDATER_AGENT_UNIT=$SB/agent.unit UPDATER_UNIT_DIR=$SB/units \
     UPDATER_SYSTEMCTL=$SB/systemctl-mock UPDATER_JOURNALCTL=$SB/journalctl-mock UPDATER_SLEEP_SCALE=0 \
+    UPDATER_SKIP_DATAPLANE_CHECK="$SKIP_DP" UPDATER_SKIP_HEARTBEAT_CHECK="$SKIP_HB" \
     bash "$UPD" > updater.out 2>&1
 }
 
@@ -131,6 +136,41 @@ cp payload-new opt/agent
 run_updater plan-good.json inactive NEVER
 check "执行了 restart（救活）" grep -q '^restart' mock.log
 check "救活后报 succeeded" grep -q '"state":"succeeded"' server.log
+
+echo "═══ 8. ★事故复现：进程活着但心跳一直失败 → 必须回滚，绝不能报 succeeded ═══"
+# 2026-07-11 真实事故：nodes.version 是 VARCHAR(32) 装不下 40 字符 git sha →
+# agent 心跳恒 500 → 节点掉线；但进程一直 active → 旧版 updater 只看 is-active →
+# 误报 succeeded → 删掉 agent.prev → 自动回滚能力当场丢失。
+cat > journalctl-mock << 'EOF'
+#!/bin/bash
+echo "Heartbeat failed: API error 500: value too long for type character varying(32)"
+echo "Heartbeat failed: API error 500: value too long for type character varying(32)"
+EOF
+chmod +x journalctl-mock
+echo old-agent-binary > opt/agent
+cp payload-new payload-serve
+SKIP_HB=""   # 打开心跳判据
+run_updater plan-good.json active NEVER
+SKIP_HB=1
+check "心跳失败 → 已回滚到旧版（不是留在坏的新版）" grep -q old-agent-binary opt/agent
+check "心跳失败 → 报 rolled_back（不是 succeeded）" grep -q '"state": *"rolled_back"' server.log
+check "★备份未被误删（回滚能力保住）" grep -q "heartbeat failing" server.log
+# 恢复原 journalctl mock
+cat > journalctl-mock << 'EOF'
+#!/bin/bash
+echo "mock-journal: agent panicked at startup"
+EOF
+chmod +x journalctl-mock
+
+echo "═══ 9. ★事故复现：进程活着但数据面没起（六协议 UDP 口缺失）→ 必须回滚 ═══"
+echo old-agent-binary > opt/agent
+cp payload-new payload-serve
+SKIP_DP=""   # 打开数据面判据（沙箱里必然 0/6 口）
+run_updater plan-good.json active NEVER
+SKIP_DP=1
+check "数据面没起 → 已回滚到旧版" grep -q old-agent-binary opt/agent
+check "数据面没起 → 报 rolled_back" grep -q '"state": *"rolled_back"' server.log
+check "last_error 说明是数据面问题" grep -q "data plane not up" server.log
 
 echo "═══ 7. --install → 写两 unit + enable --now ═══"
 : > mock.log

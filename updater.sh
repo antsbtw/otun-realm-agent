@@ -167,33 +167,66 @@ report applied
 $SYSTEMCTL restart "$AGENT_SVC"
 report verifying
 
-# ============ 6. 验证新版真的健康（进程起来只是起点，还要活得稳） ============
-# 两段观察（10s+20s）抓 crash-loop：坏二进制会被 systemd Restart=always 反复拉起，
-# 单次 is-active 会给假阳性。更强的门禁（版本上报 + 会合面六 slot 注册）在 fleet 侧
-# （U2 编排 loop fail-closed），本地只负责"进程稳定活着"。
+# ============ 6. 验证新版真的健康 ============
+# ★2026-07-11 事故教训：这里【只看 systemctl is-active】是不够的——进程活着 ≠ 在工作。
+# 那次 nodes.version 是 VARCHAR(32) 装不下 40 字符 git sha → agent 心跳恒 500 →
+# 节点掉线；但进程一直 active(running)，is-active 判它"健康" → 误报 succeeded →
+# 【删掉 agent.prev】→ 自动回滚能力当场丢失，只能人工重建旧二进制救回。
+#
+# 所以本地必须验证"它真的在工作"，而不是"它还没死"。三道判据（全过才算健康）：
+#   ① 进程稳定活着（两段观察 10s+20s，抓 crash-loop 假阳性——坏二进制会被
+#      Restart=always 反复拉起，单次 is-active 会误判）
+#   ② 数据面真的起来了：六协议 UDP 口在监听（agent 的本职；没起来 = 没在服务）
+#   ③ 心跳真的能成功：日志里没有持续的 "Heartbeat failed"（那正是本次事故的形状；
+#      心跳挂 = fleet 眼里节点下线 = 用户拿不到它）
+# fleet 侧的 fail-closed 门禁（版本上报 + 会合面注册）只能挡住【后续批次】，
+# 救不了【已经升坏的这一台】——因为备份已经被删。本地判据是最后一道能回滚的防线。
 ok=1
 pause 10; $SYSTEMCTL is-active --quiet "$AGENT_SVC" || ok=0
 if [ "$ok" = "1" ]; then pause 20; $SYSTEMCTL is-active --quiet "$AGENT_SVC" || ok=0; fi
 
+# ② 六协议 UDP 数据面口（51820-51825）。测试注入 UPDATER_SKIP_DATAPLANE_CHECK=1 跳过。
+if [ "$ok" = "1" ] && [ -z "${UPDATER_SKIP_DATAPLANE_CHECK:-}" ]; then
+    listening=$(ss -ulnH 2>/dev/null | grep -cE ':5182[0-5][[:space:]]' || true)
+    if [ "${listening:-0}" -lt 6 ]; then
+        ok=0
+        health_err="data plane not up: only ${listening:-0}/6 protocol UDP ports listening"
+        log "$health_err"
+    fi
+fi
+
+# ③ 心跳没在持续失败（重启后这段窗口里出现 Heartbeat failed = 新版连不上 fleet）。
+if [ "$ok" = "1" ] && [ -z "${UPDATER_SKIP_HEARTBEAT_CHECK:-}" ]; then
+    hb_fail=$($JOURNALCTL -u "$AGENT_SVC" --since "-40 seconds" --no-pager 2>/dev/null | grep -c "Heartbeat failed" || true)
+    if [ "${hb_fail:-0}" -gt 0 ]; then
+        ok=0
+        health_err="heartbeat failing after upgrade ($hb_fail times in last 40s) — agent is up but not registered with fleet"
+        log "$health_err"
+    fi
+fi
+
 if [ "$ok" = "1" ]; then
     rm -f "$INSTALL_DIR/agent.prev"
-    log "upgrade OK: now at ${VERSION:0:12}"
+    log "upgrade OK: now at ${VERSION:0:12} (process stable + 6/6 data-plane ports + heartbeat healthy)"
     report succeeded
     exit 0
 fi
 
 # ============ 7. 失败自动回滚（R4）→ 上报 rolled_back + 原因（R3） ============
+# ★health_err 说明【哪道判据挂了】（进程死 / 数据面没起 / 心跳失败），journal 给现场——
+# R3：第 2 层的人 SSH 之前就知道去看什么，不用从零复现。
 log "new binary unhealthy — rolling back"
-err=$($JOURNALCTL -u "$AGENT_SVC" -n 5 --no-pager 2>/dev/null | tail -3 | tr '\n' ';')
+err=$($JOURNALCTL -u "$AGENT_SVC" -n 8 --no-pager 2>/dev/null | tail -3 | tr '\n' ';')
+why="${health_err:-process not stable after restart}"
 mv "$INSTALL_DIR/agent.prev" "$INSTALL_DIR/agent"
 $SYSTEMCTL restart "$AGENT_SVC"
 pause 5
 if $SYSTEMCTL is-active --quiet "$AGENT_SVC"; then
     log "rollback OK — still on old version"
-    report rolled_back "new binary crashed after restart, rolled back OK; journal: $err"
+    report rolled_back "$why; rolled back OK; journal: $err"
 else
     # 回滚后仍起不来（极端）：机器仍可 SSH（R2 保证），交第 2 层。
     log "ROLLBACK ALSO UNHEALTHY — needs layer-2 SSH"
-    report failed "rollback also unhealthy — needs layer-2 SSH; journal: $err"
+    report failed "$why; ROLLBACK ALSO UNHEALTHY — needs layer-2 SSH; journal: $err"
 fi
 exit 0
