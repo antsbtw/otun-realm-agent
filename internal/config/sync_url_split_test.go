@@ -40,7 +40,7 @@ func TestSyncer_FleetURLEmptyFallsBackToOtun(t *testing.T) {
 	otun := rec.server("otun")
 	defer otun.Close()
 
-	s := NewSyncer(otun.URL, "", "key") // fleetURL 空
+	s := NewSyncer(otun.URL, "", "key", "dev") // fleetURL 空
 	if err := s.Register("n1", "r1", "CN", []string{"hysteria2"}, nil); err != nil {
 		t.Fatalf("register: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestSyncer_SplitRoutesRegisterHeartbeatToFleetKeepsRest(t *testing.T) {
 	defer otun.Close()
 	defer fleet.Close()
 
-	s := NewSyncer(otun.URL, fleet.URL, "key")
+	s := NewSyncer(otun.URL, fleet.URL, "key", "dev")
 
 	if err := s.Register("n1", "r1", "CN", []string{"hysteria2"}, nil); err != nil {
 		t.Fatalf("register: %v", err)

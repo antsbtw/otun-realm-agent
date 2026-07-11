@@ -50,9 +50,11 @@ jobs:
         with:
           go-version: '1.25'
       - name: Build agent
+        # ★U0：注入真实版本（git sha）。agent 经 register/heartbeat 上报它 → fleet
+        # nodes.version 不再是硬编码 2.0.0，升级编排"谁升了/谁没升"才有数据源。
         run: |
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -tags with_utls -ldflags "-s -w" \
+            go build -tags with_utls -ldflags "-s -w -X main.buildVersion=${{ github.sha }}" \
             -o agent-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/agent
       - name: Upload artifact

@@ -131,7 +131,10 @@ type UsersResponse struct {
 
 // HeartbeatRequest 心跳请求（计费通路，复用方言）。
 type HeartbeatRequest struct {
-	NodeID    string    `json:"node_id"`
+	NodeID string `json:"node_id"`
+	// Version 二进制 buildVersion（U0）。由 Syncer.Heartbeat 统一盖章，调用方不用填。
+	// 老 fleet/otun 不认识该字段会忽略 → 零回归。
+	Version   string    `json:"version,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	Load      NodeLoad  `json:"load"`
 	PublicIP  string    `json:"public_ip,omitempty"` // §5.1：仅可观测，不参与连接

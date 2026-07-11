@@ -16,21 +16,31 @@ import (
 // ★fleetURL 空 → 回退用 apiURL（不传 --fleet-url = 旧行为，register/heartbeat 仍打 otun，零回归）。
 // online 判定共库同一 nodes.last_heartbeat：心跳打到 fleet 后 fleet 写同列 → otun 与 fleet 都读到，不断链。
 type Syncer struct {
-	apiURL     string // otun-manager（用户下发 + 计费）
-	fleetURL   string // fleet-manager（纳管 register/heartbeat）；空则回退 apiURL
-	apiKey     string
-	httpClient *http.Client
+	apiURL   string // otun-manager（用户下发 + 计费）
+	fleetURL string // fleet-manager（纳管 register/heartbeat）；空则回退 apiURL
+	apiKey   string
+	// buildVersion 二进制自身版本（CI ldflags 注入 main.buildVersion 后传入）。
+	// ★U0：register/heartbeat 都带它上报 → fleet nodes.version = 真实版本，
+	// 升级编排"谁升了/谁没升/谁失败了"全靠这个数据源。与 manager 下发的配置投影
+	// 哈希（UsersResponse.Version/UserVersion/RealmVersion）是两回事，不要混。
+	buildVersion string
+	httpClient   *http.Client
 }
 
 // NewSyncer 创建配置同步器。fleetURL 空 → register/heartbeat 回退到 apiURL（向后兼容旧行为）。
-func NewSyncer(apiURL, fleetURL, apiKey string) *Syncer {
+// buildVersion 空 → "dev"（本地/未注入构建，别让 nodes.version 被清成空串）。
+func NewSyncer(apiURL, fleetURL, apiKey, buildVersion string) *Syncer {
 	if fleetURL == "" {
 		fleetURL = apiURL // ★渐进迁移零回归：不配 fleet 则纳管仍走 otun-manager（旧路径）。
 	}
+	if buildVersion == "" {
+		buildVersion = "dev"
+	}
 	return &Syncer{
-		apiURL:   apiURL,
-		fleetURL: fleetURL,
-		apiKey:   apiKey,
+		apiURL:       apiURL,
+		fleetURL:     fleetURL,
+		apiKey:       apiKey,
+		buildVersion: buildVersion,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -68,7 +78,7 @@ func (s *Syncer) Register(nodeID, realmID, region string, protocols []string, re
 
 	req := RegisterRequest{
 		NodeID:           nodeID,
-		Version:          "2.0.0",
+		Version:          s.buildVersion,
 		NodeKind:         "realm",
 		RealmID:          realmID,
 		Region:           region,
@@ -115,6 +125,10 @@ func (s *Syncer) FetchUsers() (*UsersResponse, error) {
 //   ReportConnections 消费（该通路仍指向 apiURL）。fleet 心跳返空 kick_users → agent 无操作，等价旧无 kick。
 func (s *Syncer) Heartbeat(req *HeartbeatRequest) (*HeartbeatResponse, error) {
 	url := fmt.Sprintf("%s/api/node/heartbeat", s.fleetURL)
+
+	// ★U0：心跳也带二进制版本（register 只在启动打一次；心跳带上后 fleet 的版本视图
+	// 更实时，且覆盖"register 失败但心跳成功"的边界）。统一在这里盖章，调用方不用管。
+	req.Version = s.buildVersion
 
 	var resp HeartbeatResponse
 	if err := s.postJSON(url, req, &resp); err != nil {

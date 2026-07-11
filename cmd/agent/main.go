@@ -100,9 +100,15 @@ func (a *Agent) logDegraded(reason string) {
 	log.Printf("=============================================================")
 }
 
+// buildVersion 二进制自身版本，CI 注入：-ldflags "-X main.buildVersion=<git sha>"；
+// 本地构建保持 "dev"。经 Syncer 随 register/heartbeat 上报 → fleet nodes.version（U0）。
+// ★别与 Agent.currentVersion/currentUserVersion/currentRealmVersion 混淆——那三个是
+// manager 下发的【配置投影哈希】（变了要热更/重建数据面），与二进制版本无关。
+var buildVersion = "dev"
+
 func main() {
 	log.Println("========================================")
-	log.Println("  OTun Realm Agent v2.0.0 (egress-inproc, 6-protocol)")
+	log.Printf("  OTun Realm Agent %s (egress-inproc, 6-protocol)", buildVersion)
 	log.Println("========================================")
 
 	cfg := config.LoadFromEnv()
@@ -161,7 +167,7 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 		cfg:          cfg,
 		// ★Batch 5：Syncer 拆 URL——register/heartbeat 走 FleetURL（空则回退 APIURL），
 		//   FetchUsers/ReportConnections 仍走 APIURL（otun）。billReporter（计费 stats）不动，仍 APIURL。
-		syncer:       config.NewSyncer(cfg.APIURL, cfg.FleetURL, cfg.NodeAPIKey),
+		syncer:       config.NewSyncer(cfg.APIURL, cfg.FleetURL, cfg.NodeAPIKey, buildVersion),
 		cache:        config.NewCache(dataDir),
 		selfsign:     selfsign,
 		generator:    config.NewRealmGenerator(selfsign.CertPath(), selfsign.KeyPath()),
