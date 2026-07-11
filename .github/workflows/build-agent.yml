@@ -7,6 +7,7 @@ on:
     # U1 起 sha256 随 manifest.json 与二进制同批发布（install.sh 运行时拉 manifest 校验，
     # 不再钉死 sha）→ 旧的"自指漂移"问题不存在了，工作流变更也应重编+同步 /dl/。
     # 仍跳过纯文档/install.sh 变更（不影响二进制内容，省一次无谓的发版）。
+    # ⚠️ 有 paths-ignore 时空提交不触发（零文件变更过不了路径过滤）——重触发请改本文件。
     paths-ignore:
       - 'install.sh'
       - '**.md'
