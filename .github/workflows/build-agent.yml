@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - main
-    # 只在 agent 源码变化时重编 agent。改 install.sh / 工作流 / 文档不重编，
-    # 否则会把 latest 二进制重传成新 sha256，使 install.sh 里钉的 sha 当场失效（自指漂移）。
+    # U1 起 sha256 随 manifest.json 与二进制同批发布（install.sh 运行时拉 manifest 校验，
+    # 不再钉死 sha）→ 旧的"自指漂移"问题不存在了，工作流变更也应重编+同步 /dl/。
+    # 仍跳过纯文档/install.sh 变更（不影响二进制内容，省一次无谓的发版）。
     paths-ignore:
       - 'install.sh'
-      - '.github/**'
       - '**.md'
   release:
     types: [created]
@@ -63,6 +63,40 @@ jobs:
           name: agent-${{ matrix.goos }}-${{ matrix.goarch }}
           path: agent-${{ matrix.goos }}-${{ matrix.goarch }}
 
+  # ============ U1：版本清单 manifest.json ============
+  # version = git sha（与 ldflags 注入的 buildVersion 同源）；每架构 file + sha256。
+  # 它是 /dl/ 与 GitHub latest 两个分发源的统一校验真源：install.sh 运行时拉它校验
+  # （取代硬编码 DL_SHA256），fleet 升级任务（U2）从它取 artifact sha。
+  # ⚠️ 字段顺序 file→sha256 是契约：install.sh 无 jq，靠 sed 按此顺序提取。
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Generate manifest.json
+        run: |
+          sha_amd64=$(sha256sum artifacts/agent-linux-amd64/agent-linux-amd64 | cut -d' ' -f1)
+          sha_arm64=$(sha256sum artifacts/agent-linux-arm64/agent-linux-arm64 | cut -d' ' -f1)
+          cat > manifest.json << EOF
+          {
+            "version": "${{ github.sha }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "artifacts": {
+              "linux-amd64": {"file": "agent-linux-amd64", "sha256": "${sha_amd64}"},
+              "linux-arm64": {"file": "agent-linux-arm64", "sha256": "${sha_arm64}"}
+            }
+          }
+          EOF
+          cat manifest.json
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: manifest
+          path: manifest.json
+
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -86,7 +120,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update-latest:
-    needs: build
+    needs: [build, manifest]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
@@ -95,10 +129,13 @@ jobs:
         with:
           path: artifacts
       - name: Prepare release files
+        # manifest.json 一并挂到 latest release：GitHub 兜底层也能拉到校验真源
+        # （install.sh 拉 /dl/manifest.json 失败时回退这里）。
         run: |
           mkdir -p release
           find artifacts -type f -name 'agent-*' -exec mv {} release/ \;
           chmod +x release/*
+          mv artifacts/manifest/manifest.json release/
           ls -la release/
       - name: Update latest release
         uses: softprops/action-gh-release@v1
@@ -115,3 +152,66 @@ jobs:
           prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============ U1：产物自动同步自建 /dl/（situs-web）============
+  # 此前产物靠人肉 scp，/dl/ 与 install.sh 钉的 sha 长期对不上 → 中国节点全在赌 GitHub。
+  # 安全模型（⚠️ situs-web 是生产官网回源机，爆炸半径必须钉死）：
+  #   - DL_SSH_KEY 是【受限部署 key】：服务器侧 authorized_keys 用 restrict + 强制命令
+  #     /usr/local/bin/dl-publish，只认 "put <白名单文件名> <sha256>"，内容走 stdin——
+  #     不能开 shell、不能读文件、不能写 /var/www/dl 之外任何路径。
+  #   - 原子性与完整性在【服务器侧】强制：dl-publish 先写临时文件 → sha256 校验 → rename。
+  #     nginx alias 直读文件，绝不会把半截文件发给节点；CI 想跳过校验也跳不过。
+  #   - host key 钉死在下面（公开信息，防中间人）；秘密只有 DL_SSH_KEY/DL_HOST/DL_USER。
+  #     ★别复用 DEPLOY_* secrets——那套指向 v3-svc-01，混淆危险。
+  # 发布顺序：二进制先、manifest 最后。任何时刻节点侧 sha 校验都是硬门禁，
+  # 换文件窗口内的 manifest/二进制错位只会导致校验失败重试，绝不会装错。
+  sync-dl:
+    needs: [build, manifest]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish to /dl/ via restricted key
+        env:
+          DL_HOST: ${{ secrets.DL_HOST }}
+          DL_USER: ${{ secrets.DL_USER }}
+          DL_SSH_KEY: ${{ secrets.DL_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh dist
+          printf '%s\n' "$DL_SSH_KEY" > ~/.ssh/dl_key
+          chmod 600 ~/.ssh/dl_key
+          # situs-web (13.214.21.114) ed25519 host key，钉死防 MITM
+          echo "$DL_HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBb/G7x+kYre8c4Hf59E/rSgPuuv4zBwiaRQGt2OHLFW" > ~/.ssh/dl_known_hosts
+
+          find artifacts -type f \( -name 'agent-*' -o -name 'manifest.json' \) -exec mv {} dist/ \;
+          ls -la dist/
+
+          publish() {
+            local name="$1"
+            local sha
+            sha=$(sha256sum "dist/$name" | cut -d' ' -f1)
+            echo "publishing $name ($sha)"
+            ssh -i ~/.ssh/dl_key \
+                -o UserKnownHostsFile="$HOME/.ssh/dl_known_hosts" \
+                -o StrictHostKeyChecking=yes \
+                -o IdentitiesOnly=yes \
+                "$DL_USER@$DL_HOST" "put $name $sha" < "dist/$name"
+          }
+          # 二进制先、manifest 最后（见上方安全模型注释）
+          publish agent-linux-amd64
+          publish agent-linux-arm64
+          publish manifest.json
+
+      - name: Verify /dl/ serves the new manifest
+        # 闭环校验：从公网走 nginx 真拉一次 manifest，确认 version = 本次 sha。
+        # 失败即红——"/dl/ 形同虚设"这一课不再靠人肉发现。
+        env:
+          DL_TOKEN: ${{ secrets.DL_TOKEN }}
+        run: |
+          served=$(curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" \
+            https://situstechnologies.com/dl/manifest.json | grep -o '"version": *"[^"]*"' | head -1)
+          echo "served: $served"
+          echo "$served" | grep -q "${{ github.sha }}"

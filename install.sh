@@ -97,13 +97,40 @@ esac
 #   3) 源码自编译兜底（fetch_binary 全失败返回非 0，由调用处接管；★带 -tags with_utls）
 # 每层下载后做 sha256 校验，校验不过视同该层失败、继续往下兜底。
 DL_BASE="https://situstechnologies.com/dl"
-# 预期 sha256（随脚本走 git = 可信来源；勿与二进制放同目录）。
-# ⚠️ agent tag=latest 滚动：每次 agent 发版，下面 agent-* 的 sha256 需同步更新。
-declare -A DL_SHA256=(
-    # latest = f3bd952（1b 会合面注册自检自愈 + 1c 注册健康上报）
-    [agent-linux-amd64]=df2e89df38b7b2cd3ecf071f0d353b6717e3cadffd1212f13356f24039418e0a
-    [agent-linux-arm64]=9858939c9643904eecb434eca4f9091e5d57ccc53e8dfb2cd4eec6910a7e8800
-)
+GH_LATEST="https://github.com/antsbtw/otun-realm-agent/releases/download/latest"
+# 预期 sha256：U1 起由 CI 发布的 manifest.json 提供（与二进制同批生成、原子发布），
+# 不再硬编码在本脚本里——旧模式每次发版要人肉回填 sha 再 push（自指漂移），/dl/ 因此
+# 长期校验失败形同虚设。manifest 优先拉 /dl/（带 token），回退 GitHub latest release。
+declare -A DL_SHA256=()
+
+# _load_manifest：拉 manifest.json → 填充 DL_SHA256。两源都拉不到时保持空 map
+# （_verify_sha256 无预期值放行 = 维持旧装机宽松语义；⚠️ 升级链路（updater）绝不
+# 走这条宽松路径——它的 sha 由 fleet 下发、不匹配即硬失败）。
+# 解析不依赖 jq（节点是干净 Debian）：靠 CI 生成的固定字段顺序 "file":..,"sha256":..（契约）。
+_load_manifest() {
+    local tmp
+    tmp=$(mktemp)
+    if [ -n "$DL_TOKEN" ] && curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" "$DL_BASE/manifest.json" -o "$tmp" 2>/dev/null; then
+        echo -e "${GREEN}  manifest: /dl/ mirror${NC}"
+    elif curl -fsSL "$GH_LATEST/manifest.json" -o "$tmp" 2>/dev/null; then
+        echo -e "${GREEN}  manifest: GitHub latest${NC}"
+    else
+        rm -f "$tmp"
+        echo -e "${YELLOW}  manifest unavailable from both sources — proceeding without sha256 pinning${NC}"
+        return 0
+    fi
+    local flat name sha
+    flat=$(tr -d ' \t\n' < "$tmp")
+    rm -f "$tmp"
+    for name in agent-linux-amd64 agent-linux-arm64; do
+        sha=$(printf '%s' "$flat" | sed -n 's/.*"file":"'"$name"'","sha256":"\([0-9a-f]\{64\}\)".*/\1/p')
+        [ -n "$sha" ] && DL_SHA256[$name]="$sha"
+    done
+    local ver
+    ver=$(printf '%s' "$flat" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')
+    echo -e "${GREEN}  manifest version: ${ver:0:12}${NC}"
+}
+_load_manifest
 
 # _verify_sha256 <file> <artifact-name> -> 0 通过 / 1 不过（无预期值时跳过校验、视为通过）
 _verify_sha256() {
@@ -146,7 +173,7 @@ fetch_binary() {
 #   无 exec-fork、无落盘引擎配置文件、无 v2ray_api/clash_api/hotreload IPC。
 # ★源码兜底必须带 -tags with_utls（reality 借壳握手需要 utls）。
 echo -e "${GREEN}Downloading OTun Realm Agent (egress-inproc, six-protocol)...${NC}"
-AGENT_URL="https://github.com/antsbtw/otun-realm-agent/releases/download/latest/agent-linux-${AGENT_ARCH}"
+AGENT_URL="$GH_LATEST/agent-linux-${AGENT_ARCH}"
 if fetch_binary "agent-linux-${AGENT_ARCH}" "$AGENT_URL" "$INSTALL_DIR/agent"; then
     chmod +x "$INSTALL_DIR/agent"
     echo -e "${GREEN}Agent downloaded${NC}"

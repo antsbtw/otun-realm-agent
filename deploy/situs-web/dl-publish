@@ -1,0 +1,52 @@
+#!/bin/sh
+# dl-publish —— situs-web 上的受限 CI 发布入口（U1，安装位置 /usr/local/bin/dl-publish，root:root 0755）。
+#
+# ⚠️ situs-web 是生产官网回源机。本脚本是 CI 部署 key 的 authorized_keys 强制命令
+# （restrict,command="/usr/local/bin/dl-publish"），是该 key 在这台机器上能做的【全部】：
+#   - 只认一种指令：put <文件名> <sha256>，文件内容走 stdin；
+#   - 文件名白名单硬编码（agent 二进制 + manifest；预留 install.sh/updater.sh 给 U3）；
+#   - 服务器侧强制 sha256 校验：CI 声明的 sha 与实收内容不符 → 拒绝，不留半点残留；
+#   - 原子发布：临时文件写同目录（同文件系统）→ rename。nginx alias 直读文件，
+#     任何时刻节点下到的要么是旧文件要么是新文件，绝不是半截（R1 同款 rename 语义）。
+# key 泄露的最坏情况 = 覆盖 /var/www/dl 下白名单内的文件（节点侧还有 fleet 下发 sha
+# 的硬门禁兜着），碰不到官网、开不了 shell、读不了任何东西。
+set -eu
+
+DL_DIR=/var/www/dl
+MAX_BYTES=67108864   # 64 MiB 上限（agent 二进制 ~14 MiB；防灌盘）
+
+fail() { echo "dl-publish: $1" >&2; exit "$2"; }
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+    put\ *) ;;
+    *) fail "usage: put <name> <sha256> (content on stdin)" 2 ;;
+esac
+
+set -f   # 关 glob：防 "put *" 之类把 word-splitting 展开成本地文件名
+# shellcheck disable=SC2086
+set -- $SSH_ORIGINAL_COMMAND
+[ "$#" -eq 3 ] || fail "usage: put <name> <sha256> (content on stdin)" 2
+name=$2
+sha=$3
+
+case "$name" in
+    agent-linux-amd64|agent-linux-arm64|manifest.json|install.sh|updater.sh) ;;
+    *) fail "name not in whitelist: $name" 3 ;;
+esac
+case "$sha" in
+    *[!0-9a-f]*) fail "sha256 must be lowercase hex" 3 ;;
+esac
+[ "${#sha}" -eq 64 ] || fail "sha256 must be 64 hex chars" 3
+
+tmp=$(mktemp "$DL_DIR/.upload.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+# head -c 限长后落盘；实收超限则内容被截断 → 必然过不了下面的 sha 校验，一并拒绝。
+head -c "$MAX_BYTES" > "$tmp"
+
+echo "$sha  $tmp" | sha256sum -c --status - || fail "sha256 mismatch for $name (refused)" 4
+
+chmod 0644 "$tmp"
+mv -f "$tmp" "$DL_DIR/$name"
+trap - EXIT
+echo "dl-publish: published $name ($sha)"
