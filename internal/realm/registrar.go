@@ -148,6 +148,13 @@ func (r *Registrar) Evaluate(serverURL string, registeredSelf bool, insecure boo
 	}
 }
 
+// SlotStatus 是一个 slot 的【确凿】探测结论（会合面 200 + 合法 JSON 才有资格进来；
+// 未知——404/网络错/鉴权失败——不产生 SlotStatus，1c 上报 fleet 时只报核实过的事实）。
+type SlotStatus struct {
+	Slot       string
+	Registered bool
+}
+
 // ProbeRegistered 问会合面"这些 slot 现在注册着吗"（otun-s GET /v1/{slot}/status，
 // authUser=realm token，无副作用——绝不用 409 register 探针，那会抢占空槽）。
 //
@@ -156,8 +163,8 @@ func (r *Registrar) Evaluate(serverURL string, registeredSelf bool, insecure boo
 // "未知"，按已注册处理。宁可漏探不可误 rebuild（rebuild 断在线隧道），且允许 agent
 // 先于会合面升级部署：老会合面对 /status 返 404 → 行为与本改动前逐字节一致。
 //
-// 返回 (registeredSelf, 确凿未注册的 slot 列表)。
-func (r *Registrar) ProbeRegistered(serverURL, token string, slots []string, insecure bool) (bool, []string) {
+// 返回 (registeredSelf, 确凿结论列表)。registeredSelf = 无任何确凿的未注册。
+func (r *Registrar) ProbeRegistered(serverURL, token string, slots []string, insecure bool) (bool, []SlotStatus) {
 	if serverURL == "" || len(slots) == 0 {
 		return true, nil
 	}
@@ -166,7 +173,8 @@ func (r *Registrar) ProbeRegistered(serverURL, token string, slots []string, ins
 		client = r.httpClientInsecure
 	}
 	base := strings.TrimRight(serverURL, "/")
-	var unregistered []string
+	registeredSelf := true
+	var statuses []SlotStatus
 	for _, slot := range slots {
 		req, err := http.NewRequest("GET", base+"/v1/"+url.PathEscape(slot)+"/status", nil)
 		if err != nil {
@@ -175,7 +183,7 @@ func (r *Registrar) ProbeRegistered(serverURL, token string, slots []string, ins
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
 		if err != nil {
-			continue // 网络错 = 未知，fail-safe 按已注册
+			continue // 网络错 = 未知，fail-safe 按已注册，且不进确凿结论
 		}
 		var body struct {
 			Registered *bool `json:"registered"`
@@ -185,11 +193,12 @@ func (r *Registrar) ProbeRegistered(serverURL, token string, slots []string, ins
 		if resp.StatusCode != http.StatusOK || decodeErr != nil || body.Registered == nil {
 			continue // 老会合面 404 / 鉴权失败 / 畸形响应 = 未知
 		}
+		statuses = append(statuses, SlotStatus{Slot: slot, Registered: *body.Registered})
 		if !*body.Registered {
-			unregistered = append(unregistered, slot)
+			registeredSelf = false
 		}
 	}
-	return len(unregistered) == 0, unregistered
+	return registeredSelf, statuses
 }
 
 // RebuildConfirmTicks：连续多少个 realm tick 探到未注册才触发 rebuild。

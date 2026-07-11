@@ -61,6 +61,7 @@ type Agent struct {
 	registrar   *realm.Registrar
 	reloadCount             int // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
 	lastReportedReloadCount int // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
+	lastRendezvous          *config.RendezvousHealth // 最近一次自检快照（1c，随注册/心跳上报 fleet）
 
 	dataDir             string
 	currentVersion      string             // 顶层合并 version（老 manager 无双 version 时用它判定）
@@ -223,11 +224,13 @@ func (a *Agent) Run(ctx context.Context) {
 }
 
 // register 上报节点实况（node_id + realm_id_base + 实际启用协议 + 各本地端口）给 manager。
+// 1c：捎带最近一次会合面自检快照（注册常在 rebuild 刚完成时发生，此时携带的是上一窗快照）。
 func (a *Agent) register() error {
 	a.mu.RLock()
 	protocols := append([]string(nil), a.activeProtocols...)
+	rendezvous := a.lastRendezvous
 	a.mu.RUnlock()
-	return a.syncer.Register(a.cfg.NodeID, a.cfg.RealmID, a.cfg.Region, protocols)
+	return a.syncer.Register(a.cfg.NodeID, a.cfg.RealmID, a.cfg.Region, protocols, rendezvous)
 }
 
 func (a *Agent) startHTTPServer() {
@@ -760,6 +763,10 @@ func (a *Agent) sendHeartbeat() {
 	sysLoad := stats.GetSystemLoad()
 	connections := a.activeConnections()
 
+	a.mu.RLock()
+	rendezvous := a.lastRendezvous
+	a.mu.RUnlock()
+
 	req := &config.HeartbeatRequest{
 		NodeID:    a.cfg.NodeID,
 		Timestamp: time.Now().UTC(),
@@ -769,7 +776,8 @@ func (a *Agent) sendHeartbeat() {
 			ActiveConnections: len(connections),
 			UserCount:         a.monitor.GetUserCount(),
 		},
-		PublicIP: stats.GetPublicIPv4(), // §5.1：仅可观测
+		PublicIP:         stats.GetPublicIPv4(), // §5.1：仅可观测
+		RendezvousHealth: rendezvous,            // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
 	}
 
 	resp, err := a.syncer.Heartbeat(req)
@@ -905,14 +913,36 @@ func (a *Agent) realmReconcile() {
 	// ProbeRegistered 是 fail-safe 的：老会合面（无 /status）/网络错 → 视为已注册，
 	// 行为与"写死 true"的旧基线一致。
 	registeredSelf := true
-	var unregSlots []string
+	var slotStatuses []realm.SlotStatus
 	if realmBlock != nil && serverURL != "" && a.isNodeRunning() {
 		protos := a.snapshotProtocols()
 		slots := make([]string, 0, len(protos))
 		for _, proto := range protos {
 			slots = append(slots, config.DeriveRealmID(realmBlock.RealmID, proto))
 		}
-		registeredSelf, unregSlots = a.registrar.ProbeRegistered(serverURL, realmBlock.Token, slots, insecure)
+		registeredSelf, slotStatuses = a.registrar.ProbeRegistered(serverURL, realmBlock.Token, slots, insecure)
+	}
+	var unregSlots []string
+	for _, st := range slotStatuses {
+		if !st.Registered {
+			unregSlots = append(unregSlots, st.Slot)
+		}
+	}
+
+	// 1c：存自检快照（随下次注册/心跳诚实上报 fleet）。Slots 只含确凿结论；
+	// last_register_error 取 sing-quic realm 内部最近一次 Warn+ 日志（logger 是唯一截获点）。
+	if realmBlock != nil && serverURL != "" {
+		health := &config.RendezvousHealth{
+			ServerURL:         serverURL,
+			Slots:             make([]config.RendezvousSlotHealth, 0, len(slotStatuses)),
+			LastRegisterError: config.LastRealmError(),
+		}
+		for _, st := range slotStatuses {
+			health.Slots = append(health.Slots, config.RendezvousSlotHealth{RealmID: st.Slot, Registered: st.Registered})
+		}
+		a.mu.Lock()
+		a.lastRendezvous = health
+		a.mu.Unlock()
 	}
 
 	decision := a.registrar.Evaluate(serverURL, registeredSelf, insecure)

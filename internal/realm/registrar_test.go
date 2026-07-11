@@ -103,9 +103,13 @@ func TestProbeRegistered_AllRegistered(t *testing.T) {
 	srv := statusServer(t, "tok", map[string]bool{"base-hy2": true, "base-reality": true})
 	defer srv.Close()
 	r := NewRegistrar()
-	ok, unreg := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2", "base-reality"}, false)
-	if !ok || len(unreg) != 0 {
-		t.Fatalf("want all registered, got ok=%v unreg=%v", ok, unreg)
+	ok, statuses := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2", "base-reality"}, false)
+	if !ok {
+		t.Fatalf("want all registered, got ok=%v statuses=%v", ok, statuses)
+	}
+	// 两个 slot 都有确凿结论（1c 上报 fleet 用）。
+	if len(statuses) != 2 || !statuses[0].Registered || !statuses[1].Registered {
+		t.Fatalf("want 2 conclusive registered statuses, got %v", statuses)
 	}
 }
 
@@ -113,12 +117,19 @@ func TestProbeRegistered_OneSlotLost(t *testing.T) {
 	srv := statusServer(t, "tok", map[string]bool{"base-hy2": true, "base-tuic": false})
 	defer srv.Close()
 	r := NewRegistrar()
-	ok, unreg := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2", "base-tuic"}, false)
+	ok, statuses := r.ProbeRegistered(srv.URL, "tok", []string{"base-hy2", "base-tuic"}, false)
 	if ok {
 		t.Fatal("one slot conclusively unregistered → registeredSelf must be false")
 	}
-	if len(unreg) != 1 || unreg[0] != "base-tuic" {
-		t.Fatalf("unreg=%v want [base-tuic]", unreg)
+	if len(statuses) != 2 {
+		t.Fatalf("want 2 conclusive statuses, got %v", statuses)
+	}
+	byName := map[string]bool{}
+	for _, st := range statuses {
+		byName[st.Slot] = st.Registered
+	}
+	if !byName["base-hy2"] || byName["base-tuic"] {
+		t.Fatalf("statuses wrong: %v", statuses)
 	}
 }
 

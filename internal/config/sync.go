@@ -47,11 +47,15 @@ type RegisterRequest struct {
 	RealmID   string         `json:"realm_id"`         // 出口的 realm slot 标识（base）
 	Region    string         `json:"region,omitempty"` // 首启引导值，空则后端 GeoIP 判定
 	Protocols map[string]any `json:"protocols"`        // 实况：{ "<proto>": {"port": <localPort>} }
+	// RendezvousHealth 会合面注册健康自检快照（1c）。注册常发生在 rebuild 刚完成、
+	// 会合面注册尚未落定时，携带的是【上一次】自检快照；nil = 尚无快照。
+	RendezvousHealth *RendezvousHealth `json:"rendezvous_health,omitempty"`
 }
 
 // Register 向 manager 注册 realm 出口，上报实际启用协议 + 各本地端口。
 // protocols 为空（首启还没起 node）时上报空实况，manager 侧照常记录节点存在。
-func (s *Syncer) Register(nodeID, realmID, region string, protocols []string) error {
+// rendezvous 可为 nil（尚无自检快照）。
+func (s *Syncer) Register(nodeID, realmID, region string, protocols []string, rendezvous *RendezvousHealth) error {
 	// ★Batch 5：注册纳管直连 fleet（fleetURL；空则回退 apiURL=otun，零回归）。
 	url := fmt.Sprintf("%s/api/node/register", s.fleetURL)
 
@@ -63,12 +67,13 @@ func (s *Syncer) Register(nodeID, realmID, region string, protocols []string) er
 	}
 
 	req := RegisterRequest{
-		NodeID:    nodeID,
-		Version:   "2.0.0",
-		NodeKind:  "realm",
-		RealmID:   realmID,
-		Region:    region,
-		Protocols: protoMap,
+		NodeID:           nodeID,
+		Version:          "2.0.0",
+		NodeKind:         "realm",
+		RealmID:          realmID,
+		Region:           region,
+		Protocols:        protoMap,
+		RendezvousHealth: rendezvous,
 	}
 
 	return s.postJSON(url, req, nil)

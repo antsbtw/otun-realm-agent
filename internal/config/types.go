@@ -135,6 +135,25 @@ type HeartbeatRequest struct {
 	Timestamp time.Time `json:"timestamp"`
 	Load      NodeLoad  `json:"load"`
 	PublicIP  string    `json:"public_ip,omitempty"` // §5.1：仅可观测，不参与连接
+	// RendezvousHealth 会合面注册健康自检快照（1c，诚实上报给 fleet 落库）。
+	// nil = 尚无自检结果（realm 未激活/首个 tick 未到），fleet 侧不覆盖旧值。
+	RendezvousHealth *RendezvousHealth `json:"rendezvous_health,omitempty"`
+}
+
+// RendezvousSlotHealth 单个 <base>-<proto> slot 在会合面的注册状态（确凿探测结论）。
+type RendezvousSlotHealth struct {
+	RealmID    string `json:"realm_id"`
+	Registered bool   `json:"registered"`
+}
+
+// RendezvousHealth 会合面注册健康（agent §7.9 自检的最近一次快照，随注册/心跳上报 fleet）。
+// ★Slots 只含【确凿】结论（会合面 /status 返 200 的 slot）；未知（老会合面 404/网络错）
+// 不进列表——上报的是核实过的事实，不是猜测。老会合面下 Slots 恒空，fleet 落库后据此
+// 可分辨"没探到"与"探到已注册"。
+type RendezvousHealth struct {
+	ServerURL         string                 `json:"server_url"`
+	Slots             []RendezvousSlotHealth `json:"slots"`
+	LastRegisterError string                 `json:"last_register_error,omitempty"`
 }
 
 // NodeLoad 节点负载。
