@@ -141,6 +141,11 @@ type HeartbeatRequest struct {
 	// RendezvousHealth 会合面注册健康自检快照（1c，诚实上报给 fleet 落库）。
 	// nil = 尚无自检结果（realm 未激活/首个 tick 未到），fleet 侧不覆盖旧值。
 	RendezvousHealth *RendezvousHealth `json:"rendezvous_health,omitempty"`
+	// AppliedUserVersion ★P2 切换确认握手：数据面【真实应用成功】的 user 集版本
+	// （= UsersResponse.UserVersion；应用失败不更新，节点全关时清空）。fleet 落
+	// nodes.applied_user_version，manager 的 ready 判定以此为信任锚。老 fleet 不认识
+	// 该字段会忽略 → 零回归；空串 omitempty 不上报（fleet 侧不覆盖旧值）。
+	AppliedUserVersion string `json:"applied_user_version,omitempty"`
 }
 
 // RendezvousSlotHealth 单个 <base>-<proto> slot 在会合面的注册状态（确凿探测结论）。

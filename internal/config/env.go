@@ -31,7 +31,10 @@ func LoadFromEnv() *AgentConfig {
 		FleetURL:      getEnv("FLEET_API_URL", ""),
 		NodeAPIKey:    getEnv("NODE_API_KEY", ""),
 		NodeID:        getEnv("NODE_ID", "realm-default"),
-		SyncInterval:  getDurationEnv("SYNC_INTERVAL", 60) * time.Second,
+		// ★P2 切换确认握手：60→10s。用户切换出口后要等本轮询拉到新用户集才算就绪
+		// （manager ready 判定），10s 把切换确认的 worst case 从 ~60s 压到 ~10s。
+		// realm 出口数量级小（<20），manager 侧每次只是一条索引查询 + 哈希，负载可忽略。
+		SyncInterval:  getDurationEnv("SYNC_INTERVAL", 10) * time.Second,
 		StatsInterval: getDurationEnv("STATS_INTERVAL", 60) * time.Second,
 		RealmInterval: getDurationEnv("REALM_INTERVAL", 45) * time.Second, // §7.9 30-60s
 

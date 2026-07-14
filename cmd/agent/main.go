@@ -70,7 +70,12 @@ type Agent struct {
 	currentRealm        *config.RealmBlock // 最近一次下发的 realm 块（供 §7.9 探测 server_url）
 	realmActive         bool               // 是否已用下发/缓存的 realm 配置建过 node
 	activeProtocols     []string           // 当前实际起来的协议（供 register 上报实况）
-	mu                  sync.RWMutex
+	// appliedUserVersion ★P2 切换确认握手：数据面【真实应用成功】的 user 集版本。
+	// 只在热更全部成功 / rebuild 建成（≥1 协议 started）后落值，应用失败不更新，节点全关清空
+	// ——与 currentUserVersion 不同（那个在 rebuild 路径先置值后建节点，是 decideSyncAction 的
+	// 判定基线，不是生效证据）。经心跳回报 fleet → nodes.applied_user_version，manager ready 判定的信任锚。
+	appliedUserVersion string
+	mu                 sync.RWMutex
 }
 
 // isRealmActive 线程安全读取 realm 是否已生效（供 health 端点）。
@@ -423,6 +428,9 @@ func (a *Agent) applyRebuild(resp *config.UsersResponse) error {
 		// 拉到了 users 但 manager 没带 realm 块——多半 manager 还没做 realm 对接。
 		a.logDegraded("manager responded but did not include a realm block (realm integration not deployed yet?)")
 		a.closeAllNodes()
+		a.mu.Lock()
+		a.appliedUserVersion = "" // ★P2：节点已全关，数据面没有任何生效用户集，别再回报旧版本
+		a.mu.Unlock()
 		return nil
 	}
 
@@ -470,6 +478,7 @@ func (a *Agent) applyUpdate(resp *config.UsersResponse) error {
 	a.currentUserVersion = resp.UserVersion
 	a.currentRealmVersion = resp.RealmVersion
 	a.currentRealm = resp.Realm
+	a.appliedUserVersion = resp.UserVersion // ★P2：UpdateUsers（含补救 rebuild）已全部成功
 	a.mu.Unlock()
 
 	log.Printf("UpdateUsers OK: %d users live across %d protocols (no connections dropped)",
@@ -538,6 +547,7 @@ func (a *Agent) rebuildAllNodes(resp *config.UsersResponse) error {
 
 	a.mu.Lock()
 	a.currentUserVersion = resp.UserVersion
+	a.appliedUserVersion = resp.UserVersion // ★P2：至此 node 已真实建成（≥1 协议 started）
 	a.mu.Unlock()
 
 	// 起来协议集变化 → 重报实况给 manager（异步，失败不致命）。
@@ -771,6 +781,7 @@ func (a *Agent) sendHeartbeat() {
 
 	a.mu.RLock()
 	rendezvous := a.lastRendezvous
+	applied := a.appliedUserVersion
 	a.mu.RUnlock()
 
 	req := &config.HeartbeatRequest{
@@ -782,8 +793,9 @@ func (a *Agent) sendHeartbeat() {
 			ActiveConnections: len(connections),
 			UserCount:         a.monitor.GetUserCount(),
 		},
-		PublicIP:         stats.GetPublicIPv4(), // §5.1：仅可观测
-		RendezvousHealth: rendezvous,            // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
+		PublicIP:           stats.GetPublicIPv4(), // §5.1：仅可观测
+		RendezvousHealth:   rendezvous,            // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
+		AppliedUserVersion: applied,               // ★P2：真实生效的 user 集版本（切换确认握手信任锚）
 	}
 
 	resp, err := a.syncer.Heartbeat(req)
