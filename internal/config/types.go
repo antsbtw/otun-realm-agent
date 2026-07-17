@@ -165,10 +165,17 @@ type RendezvousHealth struct {
 }
 
 // NodeLoad 节点负载。
+// ★容量指标两维分治（2026-07-16 拍板）：
+//   - ActiveConnections = 使用率（连接快照总数，1 用户可开多条）——看节点忙不忙；
+//   - ActiveUsers       = 容量水位（按 UUID 去重的在连用户数）——占多少用户名额，
+//     fleet 侧 ConcurrencyRatio 的分子（分母 concurrency_cap 是用户量级）。
+//   - UserCount         = 服务名单数（GetUserCount，≠在连），语义模糊仅保留兼容
+//     （别删，避免破坏其他读者），不再驱动任何 ratio。
 type NodeLoad struct {
 	CPUPercent        float64 `json:"cpu_percent"`
 	MemoryPercent     float64 `json:"memory_percent"`
 	ActiveConnections int     `json:"active_connections"`
+	ActiveUsers       int     `json:"active_users"`
 	UserCount         int     `json:"user_count"`
 }
 

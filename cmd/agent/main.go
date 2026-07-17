@@ -772,6 +772,18 @@ func (a *Agent) collectStats(reset bool) []egress.UserStat {
 	return a.registry.CollectStats(reset)
 }
 
+// distinctUserCount 按 ConnInfo.UUID 去重，数当前【在连用户数】（容量水位，
+// active_users 的分子）。conns 来自共享 Registry 的全协议 Snapshot（C.1），所以
+// 这里的去重天然是跨六协议全局去重：同一用户同时用 hy2+reality 只算 1，不是
+// 六个节点各自 count 相加。
+func distinctUserCount(conns []egress.ConnInfo) int {
+	seen := make(map[string]struct{}, len(conns))
+	for _, c := range conns {
+		seen[c.UUID] = struct{}{}
+	}
+	return len(seen)
+}
+
 // —— 心跳 / 观测 / 计费 ——
 
 // sendHeartbeat 发送心跳（计费通路）。
@@ -788,10 +800,13 @@ func (a *Agent) sendHeartbeat() {
 		NodeID:    a.cfg.NodeID,
 		Timestamp: time.Now().UTC(),
 		Load: config.NodeLoad{
-			CPUPercent:        sysLoad.CPUPercent,
-			MemoryPercent:     sysLoad.MemoryPercent,
+			CPUPercent:    sysLoad.CPUPercent,
+			MemoryPercent: sysLoad.MemoryPercent,
+			// 两维分治：连接总数=使用率；UUID 去重用户数=容量水位（fleet ratio 分子）。
+			// 同一次 Snapshot 一次遍历出两个数，口径同刻不漂移。
 			ActiveConnections: len(connections),
-			UserCount:         a.monitor.GetUserCount(),
+			ActiveUsers:       distinctUserCount(connections),
+			UserCount:         a.monitor.GetUserCount(), // 服务名单数（≠在连），仅保留兼容
 		},
 		PublicIP:           stats.GetPublicIPv4(), // §5.1：仅可观测
 		RendezvousHealth:   rendezvous,            // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
