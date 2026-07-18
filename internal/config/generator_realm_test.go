@@ -109,6 +109,60 @@ func TestBuildConfigs_SixProtocols(t *testing.T) {
 	}
 }
 
+// resolveHandshakeIP 是 reality 借壳目标兜底的核心：纯 IPv4 原样，空/域名时本地解析，
+// 解析不出 IPv4 返回空。纯逻辑用例（不依赖网络）覆盖 IP 透传与「无 SNI 可解析」跳过。
+func TestResolveHandshakeIP_PureLogic(t *testing.T) {
+	cases := []struct {
+		name      string
+		handshake string
+		serverName string
+		want      string
+	}{
+		{"纯IPv4原样透传", "1.2.3.4", "www.apple.com", "1.2.3.4"},
+		{"IPv6不算IPv4_无SNI跳过", "2606:2800:220:1:248:1893:25c8:1946", "", ""},
+		{"空handshake且空SNI返回空", "", "", ""},
+		{"域名handshake且空SNI返回空", "www.apple.com", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := resolveHandshakeIP(c.handshake, c.serverName); got != c.want {
+				t.Errorf("resolveHandshakeIP(%q,%q)=%q want %q", c.handshake, c.serverName, got, c.want)
+			}
+		})
+	}
+}
+
+// 借壳目标是纯 IP 时 reality 被正常构建（6 协议齐全）；handshake 为空且 SNI 无法本地
+// 解析出 IPv4 时 reality 被跳过（其余五协议照常），绝不 panic 整进程。
+func TestBuildConfigs_RealitySkippedWhenNoUsableHandshakeIP(t *testing.T) {
+	g := NewRealmGenerator("/nope.crt", "/nope.key")
+	realm := &RealmBlock{
+		RealmID:     "iptv-cn-sh",
+		ServerURL:   "http://rendezvous:9443",
+		Token:       "tok",
+		StunServers: []string{"74.125.250.129:19302"},
+		Protocols:   []string{"hysteria2", "reality", "trojan"},
+		// RealityHandshake 空 + RealityServerName 空 → generator 内默认 SNI=www.apple.com，
+		// 但为避免测试依赖 DNS，这里把 SNI 设成一个必然解析失败的保留域名，逼出「跳过」路径。
+		RealityServerName:    "invalid.reality.handshake.test.",
+		RealityPrivateKey:    "priv",
+		RealityShortID:       "0123456789abcdef",
+		RealityHandshake:     "",
+		RealityHandshakePort: 443,
+	}
+	cfgs := g.BuildConfigs(realm, "seed-uuid")
+	byProto := Config2(cfgs)
+	if _, ok := byProto["reality"]; ok {
+		t.Errorf("借壳目标解析失败时 reality 应被跳过; got cfgs=%+v", cfgs)
+	}
+	if _, ok := byProto["hysteria2"]; !ok {
+		t.Errorf("reality 跳过不应影响 hysteria2")
+	}
+	if _, ok := byProto["trojan"]; !ok {
+		t.Errorf("reality 跳过不应影响 trojan")
+	}
+}
+
 func TestBuildConfigs_EmptyProtocolsFallsBackHy2(t *testing.T) {
 	g := NewRealmGenerator("/nope.crt", "/nope.key")
 	realm := &RealmBlock{RealmID: "r", ServerURL: "u", Token: "t"} // 无 protocols

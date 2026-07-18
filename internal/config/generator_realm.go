@@ -2,10 +2,45 @@ package config
 
 import (
 	"log"
+	"net"
 	"os"
 
 	"github.com/antsbtw/otun-s-egress/egress"
 )
+
+// resolveHandshakeIP 把 reality 借壳目标规整成一个纯 IPv4 字符串。
+//
+// 为什么必须是纯 IPv4：egress 库建 reality 服务时，若 HandshakeServer 是空串或
+// 域名，sing-box 会走 domain-resolver 分支，而 egress 的裸 context 没有注册 DNS
+// transport → NewServer 返回 error → egress buildRealityServer 内 panic(err) →
+// 整个 agent 进程崩溃（reality 全网不可用的根因）。填纯 IPv4 绕开该分支。
+//
+// 入参 handshake 是 manager 下发的 reality_handshake_server（约定存 IP，但历史上
+// 可能为空或误存域名）；serverName 是借壳 SNI（默认 www.apple.com）。
+//   - handshake 已是纯 IPv4：原样用。
+//   - 否则在节点本地把 serverName 解析成一个 IPv4（每个出口拿到自己就近的 CDN IP，
+//     正是借壳目标应有的「本地可达」属性）。
+//
+// 返回空串表示无法得到可用 IPv4（解析失败）——调用方据此跳过 reality，避免 panic，
+// 靠下次 sync 自动重试。
+func resolveHandshakeIP(handshake, serverName string) string {
+	if ip := net.ParseIP(handshake); ip != nil && ip.To4() != nil {
+		return handshake
+	}
+	if serverName == "" {
+		return ""
+	}
+	addrs, err := net.LookupIP(serverName)
+	if err != nil {
+		return ""
+	}
+	for _, a := range addrs {
+		if v4 := a.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	return ""
+}
 
 // HY2InboundTag 保留为逻辑常量（日志/兼容），egress 库内部不需要 inbound_tag。
 const HY2InboundTag = "hy2-in"
@@ -139,7 +174,15 @@ func (g *RealmGenerator) BuildConfigs(realm *RealmBlock, seedUUID string) []egre
 			if cfg.ServerName == "" {
 				cfg.ServerName = "www.apple.com" // 借壳 SNI 默认（总设计 §7）
 			}
-			cfg.HandshakeServer = realm.RealityHandshake // ★必须 IP（manager 存 IP）
+			// 借壳目标必须是纯 IPv4（否则 egress buildRealityServer panic，见
+			// resolveHandshakeIP）。manager 约定存 IP，但历史上可能空/域名——在此
+			// 本地兜底解析。解析不出可用 IPv4 则跳过 reality（不 panic 整进程），
+			// 其余五协议照常起，靠下次 sync 重试。
+			cfg.HandshakeServer = resolveHandshakeIP(realm.RealityHandshake, cfg.ServerName)
+			if cfg.HandshakeServer == "" {
+				log.Printf("[generator] skip reality: no usable IPv4 handshake target (raw=%q sni=%q)", realm.RealityHandshake, cfg.ServerName)
+				continue
+			}
 			cfg.HandshakePort = realm.RealityHandshakePort
 			// reality 用洞内 WrapTLS 自签 + Reality 握手，不用外层稳定证书。
 		case "trojan":
