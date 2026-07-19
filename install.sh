@@ -46,9 +46,11 @@ FLEET_URL=""
 REALM_ID=""
 REGION=""
 OBS_ENDPOINT=""
-# 二进制分发 token（方案A /dl/ 镜像源）：env 默认，--dl-token 参数覆盖。
+# 二进制分发 token（/dl/ 唯一源）：env 默认，--dl-token 参数覆盖。
 # 仅装机时用于拉二进制，不写进 systemd/配置，运行期不需要。
-# 不带 token 时自动跳过 /dl/、直接走 GitHub（海外/不受 GFW 节点）。
+# ★2026-07-19 agent 仓转私有：GitHub release / 源码 clone 匿名均不可达，/dl/ 是唯一
+#   分发源，所有节点（含海外）装机必须带 token。token 真源：situs-web
+#   /etc/nginx/conf.d/dl_auth.conf（fleet admin 生成的装机指令已自带）。
 DL_TOKEN="${DL_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
@@ -67,11 +69,16 @@ done
 
 if [ -z "$NODE_API_KEY" ]; then
     echo -e "${RED}Error: --api-key is required${NC}"
-    echo "Usage: $0 --api-key <key> --realm-id <id> [--node-id <id>] [--region <r>] [--api-url <url>] [--fleet-url <url>] [--obs-endpoint <url>]"
+    echo "Usage: $0 --api-key <key> --realm-id <id> --dl-token <token> [--node-id <id>] [--region <r>] [--api-url <url>] [--fleet-url <url>] [--obs-endpoint <url>]"
     exit 1
 fi
 if [ -z "$REALM_ID" ]; then
     echo -e "${RED}Error: --realm-id is required (realm slot base id, e.g. iptv-sg-01)${NC}"
+    exit 1
+fi
+if [ -z "$DL_TOKEN" ]; then
+    echo -e "${RED}Error: --dl-token is required (agent repo is private; /dl/ is the only distribution source)${NC}"
+    echo "Token source: situs-web /etc/nginx/conf.d/dl_auth.conf, or copy the install command from fleet admin."
     exit 1
 fi
 
@@ -90,33 +97,28 @@ case $ARCH in
     *) echo -e "${RED}Unsupported architecture: $ARCH${NC}"; exit 1 ;;
 esac
 
-# ============ 二进制分发：/dl/ 镜像（方案A）+ GitHub 兜底 + sha256 校验 ============
-# 下载优先级：
-#   1) https://situstechnologies.com/dl/<artifact>（带 token，绕开 GFW，中国节点用）
-#   2) GitHub release（海外/不受 GFW 节点天然走这层；/dl/ 失败也回退到这）
-#   3) 源码自编译兜底（fetch_binary 全失败返回非 0，由调用处接管；★带 -tags with_utls）
-# 每层下载后做 sha256 校验，校验不过视同该层失败、继续往下兜底。
+# ============ 二进制分发：/dl/ 唯一源 + sha256 校验 ============
+# ★仓库已私有（2026-07-19）：GitHub release 匿名下载、源码匿名 clone 均物理失效，
+#   旧的"GitHub 兜底 / 源码自编译兜底"已删。/dl/（situs-web，经官网 CF 边缘，全球含
+#   中国可达）是唯一分发源；拉不到即装机中断（不再有静默降级），排障看
+#   backend-v3 仓 document/realm/ops/AGENT_PRIVATE_REPO_DISTRIBUTION_RUNBOOK.md。
 DL_BASE="https://situstechnologies.com/dl"
-GH_LATEST="https://github.com/antsbtw/otun-realm-agent/releases/download/latest"
-# 预期 sha256：U1 起由 CI 发布的 manifest.json 提供（与二进制同批生成、原子发布），
-# 不再硬编码在本脚本里——旧模式每次发版要人肉回填 sha 再 push（自指漂移），/dl/ 因此
-# 长期校验失败形同虚设。manifest 优先拉 /dl/（带 token），回退 GitHub latest release。
+# 预期 sha256：由 CI 发布的 manifest.json 提供（与二进制同批生成、原子发布），
+# 不硬编码在本脚本里（旧模式人肉回填 sha 有自指漂移问题）。
 declare -A DL_SHA256=()
 
-# _load_manifest：拉 manifest.json → 填充 DL_SHA256。两源都拉不到时保持空 map
+# _load_manifest：拉 manifest.json → 填充 DL_SHA256。拉不到时保持空 map
 # （_verify_sha256 无预期值放行 = 维持旧装机宽松语义；⚠️ 升级链路（updater）绝不
 # 走这条宽松路径——它的 sha 由 fleet 下发、不匹配即硬失败）。
 # 解析不依赖 jq（节点是干净 Debian）：靠 CI 生成的固定字段顺序 "file":..,"sha256":..（契约）。
 _load_manifest() {
     local tmp
     tmp=$(mktemp)
-    if [ -n "$DL_TOKEN" ] && curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" "$DL_BASE/manifest.json" -o "$tmp" 2>/dev/null; then
-        echo -e "${GREEN}  manifest: /dl/ mirror${NC}"
-    elif curl -fsSL "$GH_LATEST/manifest.json" -o "$tmp" 2>/dev/null; then
-        echo -e "${GREEN}  manifest: GitHub latest${NC}"
+    if curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" "$DL_BASE/manifest.json" -o "$tmp" 2>/dev/null; then
+        echo -e "${GREEN}  manifest: /dl/${NC}"
     else
         rm -f "$tmp"
-        echo -e "${YELLOW}  manifest unavailable from both sources — proceeding without sha256 pinning${NC}"
+        echo -e "${YELLOW}  manifest unavailable from /dl/ — proceeding without sha256 pinning${NC}"
         return 0
     fi
     local flat name sha
@@ -145,54 +147,33 @@ _verify_sha256() {
     return 0
 }
 
-# fetch_binary <artifact-name> <github-url> <out-path> -> 0 成功且校验过 / 1 全失败（调用方走源码编译）
+# fetch_binary <artifact-name> <out-path> -> 0 成功且校验过 / 1 失败（/dl/ 唯一源，无兜底）
 # token 不进日志（curl -H 不回显）。
 fetch_binary() {
-    local name="$1" gh_url="$2" out="$3"
-    # 第 1 层：/dl/（仅当有 token）
-    if [ -n "$DL_TOKEN" ]; then
-        echo -e "${GREEN}  [1/2] /dl/ mirror: $name${NC}"
-        if curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" "$DL_BASE/$name" -o "$out" \
-           && _verify_sha256 "$out" "$name"; then
-            return 0
-        fi
-        echo -e "${YELLOW}  /dl/ failed or sha256 mismatch, falling back to GitHub${NC}"
-        rm -f "$out"
-    fi
-    # 第 2 层：GitHub release
-    echo -e "${GREEN}  [2/2] GitHub: $name${NC}"
-    if curl -fsSL "$gh_url" -o "$out" && _verify_sha256 "$out" "$name"; then
+    local name="$1" out="$2"
+    echo -e "${GREEN}  /dl/: $name${NC}"
+    if curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" "$DL_BASE/$name" -o "$out" \
+       && _verify_sha256 "$out" "$name"; then
         return 0
     fi
     rm -f "$out"
-    return 1   # 两层都失败 → 调用方走源码编译
+    return 1
 }
 
 # ============ realm-agent 二进制（egress 内嵌六协议版）============
 # ★egress 库化后 agent 不再需要任何外部代理引擎二进制：六协议引擎由 egress 库进程内驱动，
 #   无 exec-fork、无落盘引擎配置文件、无 v2ray_api/clash_api/hotreload IPC。
-# ★源码兜底必须带 -tags with_utls（reality 借壳握手需要 utls）。
+# ★（维护者手动编译时必须带 -tags with_utls——reality 借壳握手需要 utls。装机路径
+#   不再源码自编：私库匿名 clone 不可达，兜底已删。）
 echo -e "${GREEN}Downloading OTun Realm Agent (egress-inproc, six-protocol)...${NC}"
-AGENT_URL="$GH_LATEST/agent-linux-${AGENT_ARCH}"
-if fetch_binary "agent-linux-${AGENT_ARCH}" "$AGENT_URL" "$INSTALL_DIR/agent"; then
+if fetch_binary "agent-linux-${AGENT_ARCH}" "$INSTALL_DIR/agent"; then
     chmod +x "$INSTALL_DIR/agent"
     echo -e "${GREEN}Agent downloaded${NC}"
 else
-    echo -e "${YELLOW}Download failed, building from source (with_utls for reality)...${NC}"
-    apt-get install -y -qq git
-    GO_VERSION="1.25.5"
-    if ! command -v go >/dev/null 2>&1; then
-        rm -rf /usr/local/go
-        curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${AGENT_ARCH}.tar.gz" -o /tmp/go.tar.gz
-        tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
-    fi
-    export PATH=$PATH:/usr/local/go/bin
-    command -v go >/dev/null 2>&1 || { echo -e "${RED}Go not available for source build${NC}"; exit 1; }
-    cd /tmp && rm -rf otun-realm-agent-src
-    git clone https://github.com/antsbtw/otun-realm-agent.git otun-realm-agent-src
-    cd otun-realm-agent-src
-    CGO_ENABLED=0 go build -tags with_utls -o "$INSTALL_DIR/agent" ./cmd/agent
-    cd /tmp && rm -rf otun-realm-agent-src
+    echo -e "${RED}Download from /dl/ failed — no fallback (repo is private).${NC}"
+    echo -e "${RED}Check: dl-token valid? situs-web /dl/ reachable? CI sync-dl green?${NC}"
+    echo -e "${RED}Runbook: backend-v3 document/realm/ops/AGENT_PRIVATE_REPO_DISTRIBUTION_RUNBOOK.md${NC}"
+    exit 1
 fi
 [ -f "$INSTALL_DIR/agent" ] || { echo -e "${RED}Agent binary not found${NC}"; exit 1; }
 chmod +x "$INSTALL_DIR/agent"
@@ -204,10 +185,10 @@ echo -e "${GREEN}Agent ready${NC}"
 # unit 文件由 updater.sh --install 自己写（单一真源，本脚本不抄一遍——slot 短名跨仓
 # 双写的教训）。拿不到 updater 不阻断装机：agent 照常服务，之后可单独 bootstrap。
 echo -e "${GREEN}Installing agent updater (self-upgrade timer)...${NC}"
-if fetch_binary "updater.sh" "$GH_LATEST/updater.sh" "$INSTALL_DIR/updater.sh"; then
+if fetch_binary "updater.sh" "$INSTALL_DIR/updater.sh"; then
     chmod +x "$INSTALL_DIR/updater.sh"
 else
-    echo -e "${YELLOW}updater.sh unavailable from /dl/ and GitHub — skipping (agent unaffected; bootstrap later)${NC}"
+    echo -e "${YELLOW}updater.sh unavailable from /dl/ — skipping (agent unaffected; bootstrap later)${NC}"
 fi
 
 # ============ systemd 服务（六协议 env；固定 MANAGEMENT_MODE=remote）============

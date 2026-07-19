@@ -6,10 +6,10 @@ on:
       - main
     # U1 起 sha256 随 manifest.json 与二进制同批发布（install.sh 运行时拉 manifest 校验，
     # 不再钉死 sha）→ 旧的"自指漂移"问题不存在了，工作流变更也应重编+同步 /dl/。
-    # 仍跳过纯文档/install.sh 变更（不影响二进制内容，省一次无谓的发版）。
+    # ★私库化（2026-07-19）：install.sh 也经 /dl/ 分发（raw.githubusercontent 匿名不可达，
+    #   /dl/ 是装机唯一入口），install.sh 变更必须触发 sync-dl → 不再 ignore 它；仍跳过纯文档。
     # ⚠️ 有 paths-ignore 时空提交不触发（零文件变更过不了路径过滤）——重触发请改本文件。
     paths-ignore:
-      - 'install.sh'
       - '**.md'
   release:
     types: [created]
@@ -181,6 +181,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
+      - name: Checkout
+        # 私库化：install.sh 经 /dl/ 分发（装机唯一入口），随每批发版同步。
+        uses: actions/checkout@v4
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -198,6 +201,7 @@ jobs:
           echo "$DL_HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBb/G7x+kYre8c4Hf59E/rSgPuuv4zBwiaRQGt2OHLFW" > ~/.ssh/dl_known_hosts
 
           find artifacts -type f \( -name 'agent-*' -o -name 'manifest.json' -o -name 'updater.sh' \) -exec mv {} dist/ \;
+          cp install.sh dist/
           ls -la dist/
 
           publish() {
@@ -211,10 +215,12 @@ jobs:
                 -o IdentitiesOnly=yes \
                 "$DL_USER@$DL_HOST" "put $name $sha" < "dist/$name"
           }
-          # 二进制先、manifest 最后（见上方安全模型注释）；updater.sh 在 manifest 前。
+          # 二进制先、manifest 最后（见上方安全模型注释）；updater.sh/install.sh 在 manifest 前。
+          # install.sh 不进 manifest（bootstrap 无法自校验自己），dl-publish 服务器侧 sha 校验兜完整性。
           publish agent-linux-amd64
           publish agent-linux-arm64
           publish updater.sh
+          publish install.sh
           publish manifest.json
 
       - name: Verify /dl/ serves the new manifest
