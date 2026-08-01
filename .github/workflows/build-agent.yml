@@ -230,6 +230,6 @@ jobs:
           DL_TOKEN: ${{ secrets.DL_TOKEN }}
         run: |
           served=$(curl -fsSL -H "Authorization: Bearer ${DL_TOKEN}" \
-            https://situstechnologies.com/dl/manifest.json | grep -o '"version": *"[^"]*"' | head -1)
+            https://portal.situstechnologies.com/dl/manifest.json | grep -o '"version": *"[^"]*"' | head -1)
           echo "served: $served"
           echo "$served" | grep -q "${{ github.sha }}"

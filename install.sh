@@ -99,10 +99,11 @@ esac
 
 # ============ 二进制分发：/dl/ 唯一源 + sha256 校验 ============
 # ★仓库已私有（2026-07-19）：GitHub release 匿名下载、源码匿名 clone 均物理失效，
-#   旧的"GitHub 兜底 / 源码自编译兜底"已删。/dl/（situs-web，经官网 CF 边缘，全球含
-#   中国可达）是唯一分发源；拉不到即装机中断（不再有静默降级），排障看
+#   旧的"GitHub 兜底 / 源码自编译兜底"已删。/dl/（situs-web，经 portal 子域 CF 边缘，
+#   全球含中国可达）是唯一分发源；拉不到即装机中断（不再有静默降级），排障看
 #   backend-v3 仓 document/realm/ops/AGENT_PRIVATE_REPO_DISTRIBUTION_RUNBOOK.md。
-DL_BASE="https://situstechnologies.com/dl"
+#   ★主域名已切 CF Tunnel 绕过 situs-web，/dl/ 只在 portal 子域可达，勿改回主域名。
+DL_BASE="https://portal.situstechnologies.com/dl"
 # 预期 sha256：由 CI 发布的 manifest.json 提供（与二进制同批生成、原子发布），
 # 不硬编码在本脚本里（旧模式人肉回填 sha 有自指漂移问题）。
 declare -A DL_SHA256=()
