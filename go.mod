@@ -2,13 +2,13 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20260703100908-20292c50775d // pin: branch feat/r2a-user-attribution f
+require github.com/antsbtw/otun-s-egress v0.0.0-20260801131848-50eb93c4978f // pin: branch feat/punch-observer-trace
 
 require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
-	github.com/antsbtw/sing-quic v0.6.2-0.20260525051024-9467ede27fb7 // indirect
+	github.com/antsbtw/sing-quic v0.6.2-0.20260801130712-84bb3916b4e2 // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/database64128/netx-go v0.1.1 // indirect
@@ -61,14 +61,9 @@ require (
 	golang.org/x/tools v0.45.0 // indirect
 )
 
-// NOTE: egress lib pinned to commit 86d87f1 on branch feat/r2a-user-attribution
-// (C.1/C.2 shared meter Registry across six nodes — required by cmd/agent). Repo is
-// public and this commit is reachable via GOPROXY, so NO local replace is needed
+// NOTE: egress lib pinned to commit 50eb93c on branch feat/punch-observer-trace
+// (receiver-side punch trace via the antsbtw/sing-quic PunchObserver fork; also
+// carries C.1/C.2 shared meter Registry + ActiveUserCount). Repo is public and
+// the commit is reachable via GOPROXY/direct, so NO local replace is needed
 // (CI resolves it directly). Bump with `go get github.com/antsbtw/otun-s-egress@<sha>`
 // when the egress lib advances; do NOT re-add `replace => /tmp/...` (breaks CI).
-
-// TEMPORARY (dev only): local egress lib + sing-quic fork until both are
-// pushed; swap for real pseudo-versions before merge (CI has no local paths).
-replace github.com/antsbtw/otun-s-egress => /home/wenwu/work/otun-s-egress
-
-replace github.com/antsbtw/sing-quic => /home/wenwu/work/sing-quic-punch-observer
