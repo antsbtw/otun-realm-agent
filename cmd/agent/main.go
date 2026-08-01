@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/antsbtw/otun-s-egress/egress"
+	"github.com/antsbtw/otun-s-egress/node/punchtrace"
 
 	"otun-realm-agent/internal/api"
 	"otun-realm-agent/internal/config"
@@ -597,10 +598,24 @@ func (a *Agent) rebuildProtocols(resp *config.UsersResponse, protocols []string)
 	return firstErr
 }
 
+// punchTraceSink 返回接收端打洞埋点的 sink；未开启（OTUN_PROBE_TRACE≠"1"，
+// 生产默认）时返回 nil → egress 库不建 Observer，打洞引擎零观测。
+// 开启时每条完成的打洞应答轨迹进 obs 信封（schema=punch_trace_egress），
+// 随现有 obsFlushTicker 批量上报 /obs/ingest；sink 只入队不阻塞（引擎契约）。
+func (a *Agent) punchTraceSink() punchtrace.Sink {
+	if !obs.PunchTraceEnabled() {
+		return nil
+	}
+	return func(rec punchtrace.Record) {
+		a.obsReporter.Enqueue(obs.SchemaPunchTraceEgress, rec)
+	}
+}
+
 // startOneLocked 为一个协议开 UDP socket、egress.New（注入共享 Registry）、Start、UpdateUsers。
 // 调用方须持有 nodeMu，且 a.registry 已就绪。
 func (a *Agent) startOneLocked(cfg egress.Config, users []egress.User) error {
-	cfg.Meter = a.registry // ★注入共享 Registry（C.1）
+	cfg.Meter = a.registry                  // ★注入共享 Registry（C.1）
+	cfg.PunchTraceSink = a.punchTraceSink() // 接收端打洞埋点（默认 nil=关）
 
 	port := config.LocalPort(cfg.Protocol)
 	if port == 0 {

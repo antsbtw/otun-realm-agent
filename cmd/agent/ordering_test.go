@@ -45,6 +45,7 @@ func (n *recordingNode) UpdateUsers(users []egress.User) error {
 func (n *recordingNode) CollectStats(reset bool) []egress.UserStat { return nil }
 func (n *recordingNode) KickUser(uuid string) int                  { return 0 }
 func (n *recordingNode) ActiveConnections() []egress.ConnInfo      { return nil }
+func (n *recordingNode) ActiveUserCount() int                      { return 0 }
 
 type testErr string
 

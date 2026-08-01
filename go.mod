@@ -4,8 +4,11 @@ go 1.25.5
 
 require github.com/antsbtw/otun-s-egress v0.0.0-20260703100908-20292c50775d // pin: branch feat/r2a-user-attribution f
 
+require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
+
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/antsbtw/sing-quic v0.6.2-0.20260525051024-9467ede27fb7 // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/database64128/netx-go v0.1.1 // indirect
@@ -36,9 +39,7 @@ require (
 	github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a // indirect
 	github.com/sagernet/nftables v0.3.0-mod.2 // indirect
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4 // indirect
-	github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df // indirect
 	github.com/sagernet/sing-box v1.14.0-alpha.26 // indirect
-	github.com/sagernet/sing-quic v0.6.2-0.20260525051024-9467ede27fb7 // indirect
 	github.com/sagernet/sing-shadowsocks v0.2.8 // indirect
 	github.com/sagernet/sing-tun v0.8.10-0.20260519125758-eb58efc8915d // indirect
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1 // indirect
@@ -65,3 +66,9 @@ require (
 // public and this commit is reachable via GOPROXY, so NO local replace is needed
 // (CI resolves it directly). Bump with `go get github.com/antsbtw/otun-s-egress@<sha>`
 // when the egress lib advances; do NOT re-add `replace => /tmp/...` (breaks CI).
+
+// TEMPORARY (dev only): local egress lib + sing-quic fork until both are
+// pushed; swap for real pseudo-versions before merge (CI has no local paths).
+replace github.com/antsbtw/otun-s-egress => /home/wenwu/work/otun-s-egress
+
+replace github.com/antsbtw/sing-quic => /home/wenwu/work/sing-quic-punch-observer
