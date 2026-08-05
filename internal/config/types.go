@@ -71,7 +71,22 @@ type RealmBlock struct {
 	ServerURL   string   `json:"server_url"`   // 会合面 URL
 	Token       string   `json:"token"`        // ★会合面 token（一 token 多 realm_id）
 	StunServers []string `json:"stun_servers"` // 坑#2：必须 IP 不能域名
-	SNI         string   `json:"sni"`          // 默认 iptv.local
+	// DirectAddresses 非空 → direct 模式：本节点是固定公网 IP（或 1:1 静态 NAT，
+	// 如 AWS Elastic IP），跳过 STUN 反射与双向打洞对撞，直接把这些 "IP:port"
+	// 上报给客户端，打洞仅被动应答。
+	// 动因：客户端若在对称 NAT 后（实测中国移动蜂窝即是），双向对撞必败；
+	// 而本节点地址固定可直连，客户端主动发包后其 NAT 会放行回程。
+	// 空 = 走原打洞逻辑，其它节点零影响。
+	DirectAddresses []string `json:"direct_addresses,omitempty"`
+	// RelayAddresses 非空 → 启用中继回退（RELAY_FALLBACK_DESIGN.md §3.2）：
+	// 收到会合面打洞事件时，本节点在打洞的同时向这些中继报到（报同一 nonce）；
+	// 客户端打洞失败转中继时两条流对接，握手端到端跑通，出口仍是本节点住宅 IP。
+	//
+	// 与 DirectAddresses 的区别：那个要求本节点有固定公网 IP（机房 VPS 才成立），
+	// 私宅节点没有固定入口，只能靠双方各自主动出站连中继。
+	// 空 = 不启用，行为与改动前一致。
+	RelayAddresses []string `json:"relay_addresses,omitempty"`
+	SNI            string   `json:"sni"` // 默认 iptv.local
 	// 会合面用自签证书（纯 IP 部署、无公网 CA）时置 true，出口跳过会合面 TLS 证书校验。
 	// 仅控制通道，不影响打洞数据面隧道 TLS。透传到 egress.Config.RendezvousInsecureTLS。
 	RendezvousInsecure bool `json:"rendezvous_insecure,omitempty"`

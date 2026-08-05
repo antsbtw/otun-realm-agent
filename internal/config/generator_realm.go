@@ -4,6 +4,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/antsbtw/otun-s-egress/egress"
 )
@@ -131,6 +132,31 @@ func (g *RealmGenerator) BuildConfigs(realm *RealmBlock, seedUUID string) []egre
 		protocols = []string{"hysteria2"}
 	}
 
+	// 灰度开关：manager 尚未下发 direct_addresses 时，允许用环境变量在单节点先验证。
+	// 逗号分隔的 "IP:port"。manager 下发值优先——正式链路就绪后本开关自然失效。
+	// 仅在下发为空时生效，避免"改了 DB 却被本地环境变量盖掉"这类难查的错配。
+	if len(realm.DirectAddresses) == 0 {
+		if env := os.Getenv("OTUN_REALM_DIRECT_ADDRESSES"); env != "" {
+			for _, s := range strings.Split(env, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					realm.DirectAddresses = append(realm.DirectAddresses, s)
+				}
+			}
+		}
+	}
+
+	// 中继回退地址：同口径的灰度开关（manager 未下发时可用环境变量单节点先验证）。
+	// 下发值优先，避免"改了 DB 却被本地环境变量盖掉"这类难查的错配。
+	if len(realm.RelayAddresses) == 0 {
+		if env := os.Getenv("OTUN_REALM_RELAY_ADDRESSES"); env != "" {
+			for _, s := range strings.Split(env, ",") {
+				if s = strings.TrimSpace(s); s != "" {
+					realm.RelayAddresses = append(realm.RelayAddresses, s)
+				}
+			}
+		}
+	}
+
 	sni := "iptv.local"
 	if realm.SNI != "" {
 		sni = realm.SNI
@@ -145,8 +171,13 @@ func (g *RealmGenerator) BuildConfigs(realm *RealmBlock, seedUUID string) []egre
 			Token:       realm.Token,
 			RealmID:     DeriveRealmID(realm.RealmID, proto), // <base>-<proto>
 			STUNServers: realm.StunServers,                   // 域名/IP 原样透传（真机已验证域名可用）
-			SNI:         sni,
-			ALPN:        []string{"h3"},
+			// direct 模式：非空则跳过 STUN 打洞，直接上报固定地址（见 RealmBlock.DirectAddresses）
+			DirectAddresses: realm.DirectAddresses,
+			// 中继回退：非空则在打洞的同时向这些中继报到，供客户端打洞失败时对接
+			// （见 RealmBlock.RelayAddresses）。
+			RelayAddresses: realm.RelayAddresses,
+			SNI:            sni,
+			ALPN:           []string{"h3"},
 			// ★接会合面注册日志：此前不设 → sing-quic 用 NOP logger → STUN/Register/
 			// event-stream 全过程不可观测。注入后进 journal，便于排障（如开机 DNS 未就绪
 			// 致 STUN 解析失败、注册未发起等）。
