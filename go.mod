@@ -2,13 +2,13 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20260812145759-ccbccb25cb7f // pin: branch feat/punch-observer-trace
+require github.com/antsbtw/otun-s-egress v0.0.0-20260813235553-da67ee8b37d8 // pin: branch feat/punch-observer-trace
 
 require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
-	github.com/antsbtw/sing-quic v0.6.2-0.20260812143809-87a68fd39698 // indirect
+	github.com/antsbtw/sing-quic v0.6.2-0.20260813235348-15b3ac97f8ea // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/database64128/netx-go v0.1.1 // indirect
