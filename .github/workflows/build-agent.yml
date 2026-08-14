@@ -61,11 +61,28 @@ jobs:
             go build -tags with_utls -ldflags "-s -w -X main.buildVersion=${{ github.sha }}" \
             -o agent-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/agent
+      - name: Build otun-relay (A1b 兼职中继二进制，随 agent 同批分发)
+        # ★RELAY_FLEET_BOUNDARY_DESIGN §5bis：agent 对账拉起兼职中继需要二进制，
+        # 与 agent 走同一条 /dl/ 分发链（manifest sha 校验 + 心跳下发 token）。
+        # 版本钉死到 otun-relay 仓的具体 sha（升级中继 = 改这里的 RELAY_SHA，
+        # 与"fleet 标记目标版本"的慢变量语义一致，不隐式追 HEAD）。
+        env:
+          RELAY_REPO: https://github.com/antsbtw/otun-relay
+          RELAY_SHA: 20a5f21946ea2b3fd0aba9eaf639257dc675d312
+        run: |
+          git clone --depth 50 "$RELAY_REPO" /tmp/otun-relay
+          git -C /tmp/otun-relay checkout "$RELAY_SHA"
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go -C /tmp/otun-relay build -ldflags "-s -w" \
+            -o "$GITHUB_WORKSPACE/otun-relay-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            ./cmd/otun-relay
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: agent-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: agent-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            agent-${{ matrix.goos }}-${{ matrix.goarch }}
+            otun-relay-${{ matrix.goos }}-${{ matrix.goarch }}
 
   # ============ U1：版本清单 manifest.json ============
   # version = git sha（与 ldflags 注入的 buildVersion 同源）；每架构 file + sha256。
@@ -84,9 +101,13 @@ jobs:
         with:
           path: artifacts
       - name: Generate manifest.json
+        # ★A1b：relay-* 条目 = 兼职中继二进制（fleet relayDownloadInfo 按 "relay-" 前缀
+        # 提取、经心跳下发给 agent relaymgr 校验安装）。字段顺序契约同上（file→sha256）。
         run: |
           sha_amd64=$(sha256sum artifacts/agent-linux-amd64/agent-linux-amd64 | cut -d' ' -f1)
           sha_arm64=$(sha256sum artifacts/agent-linux-arm64/agent-linux-arm64 | cut -d' ' -f1)
+          sha_relay_amd64=$(sha256sum artifacts/agent-linux-amd64/otun-relay-linux-amd64 | cut -d' ' -f1)
+          sha_relay_arm64=$(sha256sum artifacts/agent-linux-arm64/otun-relay-linux-arm64 | cut -d' ' -f1)
           sha_updater=$(sha256sum updater.sh | cut -d' ' -f1)
           cat > manifest.json << EOF
           {
@@ -95,6 +116,8 @@ jobs:
             "artifacts": {
               "linux-amd64": {"file": "agent-linux-amd64", "sha256": "${sha_amd64}"},
               "linux-arm64": {"file": "agent-linux-arm64", "sha256": "${sha_arm64}"},
+              "relay-linux-amd64": {"file": "otun-relay-linux-amd64", "sha256": "${sha_relay_amd64}"},
+              "relay-linux-arm64": {"file": "otun-relay-linux-arm64", "sha256": "${sha_relay_arm64}"},
               "updater": {"file": "updater.sh", "sha256": "${sha_updater}"}
             }
           }
@@ -120,7 +143,7 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          find artifacts -type f -name 'agent-*' -exec mv {} release/ \;
+          find artifacts -type f \( -name 'agent-*' -o -name 'otun-relay-*' \) -exec mv {} release/ \;
           chmod +x release/*
           ls -la release/
       - name: Upload to Release
@@ -144,7 +167,7 @@ jobs:
         # 校验真源与升级执行器（install.sh 拉 /dl/ 失败时回退这里）。
         run: |
           mkdir -p release
-          find artifacts -type f -name 'agent-*' -exec mv {} release/ \;
+          find artifacts -type f \( -name 'agent-*' -o -name 'otun-relay-*' \) -exec mv {} release/ \;
           chmod +x release/*
           mv artifacts/manifest/manifest.json artifacts/manifest/updater.sh release/
           ls -la release/
@@ -200,7 +223,7 @@ jobs:
           # situs-web (13.214.21.114) ed25519 host key，钉死防 MITM
           echo "$DL_HOST ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBb/G7x+kYre8c4Hf59E/rSgPuuv4zBwiaRQGt2OHLFW" > ~/.ssh/dl_known_hosts
 
-          find artifacts -type f \( -name 'agent-*' -o -name 'manifest.json' -o -name 'updater.sh' \) -exec mv {} dist/ \;
+          find artifacts -type f \( -name 'agent-*' -o -name 'otun-relay-*' -o -name 'manifest.json' -o -name 'updater.sh' \) -exec mv {} dist/ \;
           cp install.sh dist/
           ls -la dist/
 
@@ -219,6 +242,8 @@ jobs:
           # install.sh 不进 manifest（bootstrap 无法自校验自己），dl-publish 服务器侧 sha 校验兜完整性。
           publish agent-linux-amd64
           publish agent-linux-arm64
+          publish otun-relay-linux-amd64
+          publish otun-relay-linux-arm64
           publish updater.sh
           publish install.sh
           publish manifest.json

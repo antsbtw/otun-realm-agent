@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -22,6 +23,7 @@ import (
 	"otun-realm-agent/internal/obs"
 	"otun-realm-agent/internal/quota"
 	"otun-realm-agent/internal/realm"
+	"otun-realm-agent/internal/relaymgr"
 	"otun-realm-agent/internal/stats"
 )
 
@@ -60,6 +62,8 @@ type Agent struct {
 
 	// realm 重注册（§7.9）。
 	registrar   *realm.Registrar
+	// ★A1b 兼职中继对账器（RELAY_FLEET_BOUNDARY_DESIGN §5bis）。
+	relayMgr *relaymgr.Manager
 	reloadCount             int // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
 	lastReportedReloadCount int // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
 	lastRendezvous          *config.RendezvousHealth // 最近一次自检快照（1c，随注册/心跳上报 fleet）
@@ -188,6 +192,7 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 		behavior:     obs.NewBehaviorAggregator(300, obs.AbuseThresholds{}, nil),
 		probeTargets: obs.DefaultProbeTargets(),
 		registrar:    realm.NewRegistrar(),
+		relayMgr:     relaymgr.New(), // ★A1b：兼职中继对账器（期望态随心跳下发）
 		dataDir:      dataDir,
 		nodes:        map[string]egress.Node{},
 		conns:        map[string]net.PacketConn{},
@@ -826,6 +831,7 @@ func (a *Agent) sendHeartbeat() {
 		PublicIP:           stats.GetPublicIPv4(), // §5.1：仅可观测
 		RendezvousHealth:   rendezvous,            // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
 		AppliedUserVersion: applied,               // ★P2：真实生效的 user 集版本（切换确认握手信任锚）
+		RelayStats:         a.relayMgr.CollectStats(), // ★A1b：兼职中继 /stats 快照捎带（nil=未开/未起）
 	}
 
 	resp, err := a.syncer.Heartbeat(req)
@@ -841,6 +847,17 @@ func (a *Agent) sendHeartbeat() {
 		log.Println("Manager requested user reload")
 		if err := a.syncAndApply(); err != nil {
 			log.Printf("Reload-on-request failed: %v", err)
+		}
+	}
+
+	// ★A1b 兼职中继对账：fleet 期望态随心跳下发，relaymgr 异步幂等收敛
+	// （内容不变零动作；解析失败只记日志——对账绝不拖垮心跳主循环）。
+	if len(resp.Relay) > 0 {
+		var d relaymgr.Directive
+		if err := json.Unmarshal(resp.Relay, &d); err != nil {
+			log.Printf("[relaymgr] bad relay directive: %v", err)
+		} else {
+			a.relayMgr.Apply(&d)
 		}
 	}
 }

@@ -1,6 +1,9 @@
 package config
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // AgentConfig 是 realm-agent 的运行配置。
 // 相对 otun-node-agent：固定 remote 模式、六协议全上、无 server_ip。
@@ -161,6 +164,10 @@ type HeartbeatRequest struct {
 	// nodes.applied_user_version，manager 的 ready 判定以此为信任锚。老 fleet 不认识
 	// 该字段会忽略 → 零回归；空串 omitempty 不上报（fleet 侧不覆盖旧值）。
 	AppliedUserVersion string `json:"applied_user_version,omitempty"`
+	// RelayStats ★A1b 兼职中继（RELAY_FLEET_BOUNDARY_DESIGN §5quater）：本机 otun-relay
+	// /stats 快照原样捎带。nil = 未开兼职/中继未起，fleet 侧快照过期自然判不健康。
+	// 老 fleet 不认识该字段会忽略 → 零回归。
+	RelayStats json.RawMessage `json:"relay_stats,omitempty"`
 }
 
 // RendezvousSlotHealth 单个 <base>-<proto> slot 在会合面的注册状态（确凿探测结论）。
@@ -199,6 +206,10 @@ type HeartbeatResponse struct {
 	OK          bool     `json:"ok"`
 	KickUsers   []string `json:"kick_users"`
 	ReloadUsers bool     `json:"reload_users"`
+	// Relay ★A1b 兼职中继期望态（fleet 下发；nil = 本节点未开兼职）。原样透传给
+	// relaymgr 对账（形状契约在 relaymgr.Directive，这里 RawMessage 避免 config 包
+	// 依赖 relaymgr）。老 fleet 不返此字段 → nil → 对账零动作。
+	Relay json.RawMessage `json:"relay,omitempty"`
 }
 
 // Connection 活跃连接（计费上报用）。
