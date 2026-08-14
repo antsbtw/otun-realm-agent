@@ -67,7 +67,8 @@ jobs:
         # 版本钉死到 otun-relay 仓的具体 sha（升级中继 = 改这里的 RELAY_SHA，
         # 与"fleet 标记目标版本"的慢变量语义一致，不隐式追 HEAD）。
         env:
-          RELAY_REPO: https://github.com/antsbtw/otun-relay
+          # 仓名 antsbtw-otun-relay ≠ 模块名 otun-relay：CI 是 clone+build 不走模块解析，无影响。
+          RELAY_REPO: https://github.com/antsbtw/antsbtw-otun-relay
           RELAY_SHA: 20a5f21946ea2b3fd0aba9eaf639257dc675d312
         run: |
           git clone --depth 50 "$RELAY_REPO" /tmp/otun-relay
