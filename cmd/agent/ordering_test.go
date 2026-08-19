@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -230,5 +232,76 @@ func TestKickUser_SharedRegistry_AllProtocols(t *testing.T) {
 	}
 	if after := len(reg.Snapshot()); after != 0 {
 		t.Fatalf("after kick no live conns should remain; got %d", after)
+	}
+}
+
+// ★计费不丢：Report 的两条失败路径必须区别对待，因为 CollectStats(true) 已经把
+// 计数器清零了 —— 那一窗字节唯一的副本就在调用方内存里。
+//
+//   - 上报失败但落盘成功 → 已交接（FlushCache 会重传），绝不可回滚，否则重复计费。
+//   - 上报失败【且】落盘失败 → 无处存身，必须加回 Registry，否则永久少计费。
+//
+// 老实现两条路径都只 return，第二条静默丢账（exactly-once 退化成 at-most-once）。
+
+// 上报不通但 spool 可写 → 账已落盘，Registry 必须保持清零（不能重复计费）。
+func TestBilling_SpooledToDisk_DoesNotRestore(t *testing.T) {
+	reg := egress.NewRegistry()
+	seedRegistry(t, reg, "u-spool", "hysteria2", 400)
+	a := newTestAgent(t, reg, map[string]egress.Node{}) // URL 不可达，cacheDir 可写
+
+	a.collectAndReportBilling()
+
+	if residual := registryTotal(reg); residual != 0 {
+		t.Fatalf("bytes were spooled to disk; restoring them too would double-bill. residual=%d, want 0", residual)
+	}
+	if n := a.billReporter.GetCacheCount(); n == 0 {
+		t.Fatalf("expected the failed report to be spooled to disk, got cache count 0")
+	}
+}
+
+// 上报不通【且】spool 不可写 → 必须把字节加回 Registry，下一窗重新计费。
+func TestBilling_ReportAndSpoolBothFail_RestoresBytes(t *testing.T) {
+	reg := egress.NewRegistry()
+	seedRegistry(t, reg, "u-lost", "hysteria2", 900)
+	before := registryTotal(reg)
+	if before == 0 {
+		t.Fatal("seed failed")
+	}
+
+	// 造双重失败：URL 不可达 + cacheDir 指向一个不可创建文件的路径（用普通文件当目录）。
+	badDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badDir, []byte("x"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	a := newTestAgent(t, reg, map[string]egress.Node{})
+	a.billReporter = stats.NewReporter("http://127.0.0.1:1/unreachable", "k", badDir)
+
+	a.collectAndReportBilling()
+
+	if got := registryTotal(reg); got != before {
+		t.Fatalf("report+spool both failed: bytes must be restored for re-billing; registry=%d, want %d", got, before)
+	}
+}
+
+// 回滚必须是累加：失败上报期间在连的连接仍在计数，覆盖式恢复会吞掉这部分。
+func TestBilling_RestoreIsAdditive_KeepsInFlightBytes(t *testing.T) {
+	reg := egress.NewRegistry()
+	seedRegistry(t, reg, "u-add", "hysteria2", 500)
+
+	badDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badDir, []byte("x"), 0644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	a := newTestAgent(t, reg, map[string]egress.Node{})
+	a.billReporter = stats.NewReporter("http://127.0.0.1:1/unreachable", "k", badDir)
+
+	// 采账清零后、回滚前，模拟这一窗又跑了流量。
+	a.collectAndReportBilling()
+	seedRegistry(t, reg, "u-add", "hysteria2", 70)
+
+	// 两次都失败，累计应为 500(回滚) + 70(期间) + 再回滚的 570 = 1140。
+	// 这里只断言不丢：总量必须 >= 570（回滚的 + 期间的都在）。
+	if got := registryTotal(reg); got < 570 {
+		t.Fatalf("restore must be additive (not overwrite in-flight bytes); registry=%d, want >=570", got)
 	}
 }

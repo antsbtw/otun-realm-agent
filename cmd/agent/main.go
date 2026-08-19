@@ -61,11 +61,11 @@ type Agent struct {
 	probeTargets []obs.ProbeTarget
 
 	// realm 重注册（§7.9）。
-	registrar   *realm.Registrar
+	registrar *realm.Registrar
 	// ★A1b 兼职中继对账器（RELAY_FLEET_BOUNDARY_DESIGN §5bis）。
-	relayMgr *relaymgr.Manager
-	reloadCount             int // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
-	lastReportedReloadCount int // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
+	relayMgr                *relaymgr.Manager
+	reloadCount             int                      // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
+	lastReportedReloadCount int                      // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
 	lastRendezvous          *config.RendezvousHealth // 最近一次自检快照（1c，随注册/心跳上报 fleet）
 
 	dataDir             string
@@ -174,7 +174,7 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 	}
 
 	agent := &Agent{
-		cfg:          cfg,
+		cfg: cfg,
 		// ★Batch 5：Syncer 拆 URL——register/heartbeat 走 FleetURL（空则回退 APIURL），
 		//   FetchUsers/ReportConnections 仍走 APIURL（otun）。billReporter（计费 stats）不动，仍 APIURL。
 		syncer:       config.NewSyncer(cfg.APIURL, cfg.FleetURL, cfg.NodeAPIKey, buildVersion),
@@ -792,6 +792,26 @@ func (a *Agent) collectStats(reset bool) []egress.UserStat {
 	return a.registry.CollectStats(reset)
 }
 
+// restoreStats 把一窗未能交接的账加回共享 Registry（配套 collectStats(true)）。
+// 只在 Report 双重失败（上报失败 + 落盘失败）时调用；成功路径调用会重复计费。
+func (a *Agent) restoreStats(raw []egress.UserStat) {
+	if len(raw) == 0 {
+		return
+	}
+	a.nodeMu.Lock()
+	defer a.nodeMu.Unlock()
+	if a.registry == nil {
+		// Registry 已随重建换掉/清空：这一窗确实无处可加回，如实记账丢失量。
+		var lost int64
+		for _, s := range raw {
+			lost += s.Upload + s.Download
+		}
+		log.Printf("[Billing] registry gone; %d bytes across %d users could not be restored", lost, len(raw))
+		return
+	}
+	a.registry.RestoreStats(raw)
+}
+
 // distinctUserCount 按 ConnInfo.UUID 去重，数当前【在连用户数】（容量水位，
 // active_users 的分子）。conns 来自共享 Registry 的全协议 Snapshot（C.1），所以
 // 这里的去重天然是跨六协议全局去重：同一用户同时用 hy2+reality 只算 1，不是
@@ -828,9 +848,9 @@ func (a *Agent) sendHeartbeat() {
 			ActiveUsers:       distinctUserCount(connections),
 			UserCount:         a.monitor.GetUserCount(), // 服务名单数（≠在连），仅保留兼容
 		},
-		PublicIP:           stats.GetPublicIPv4(), // §5.1：仅可观测
-		RendezvousHealth:   rendezvous,            // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
-		AppliedUserVersion: applied,               // ★P2：真实生效的 user 集版本（切换确认握手信任锚）
+		PublicIP:           stats.GetPublicIPv4(),     // §5.1：仅可观测
+		RendezvousHealth:   rendezvous,                // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）
+		AppliedUserVersion: applied,                   // ★P2：真实生效的 user 集版本（切换确认握手信任锚）
 		RelayStats:         a.relayMgr.CollectStats(), // ★A1b：兼职中继 /stats 快照捎带（nil=未开/未起）
 	}
 
@@ -1091,8 +1111,12 @@ func (a *Agent) collectAndReportBilling() {
 		}
 	}
 
+	// ★计费不丢：Report 返回 non-nil 表示上报失败【且】落盘也失败 —— 这些字节
+	// 已被 CollectStats(true) 从计数器里清零，只存在于 raw 里。必须加回 Registry，
+	// 否则随栈帧永久消失（少计费）。落盘成功不回滚，否则重复计费。
 	if err := a.billReporter.Report(userStats); err != nil {
-		log.Printf("Failed to report stats: %v", err)
+		log.Printf("Failed to report stats: %v — restoring %d entries to meter for re-billing", err, len(raw))
+		a.restoreStats(raw)
 		return
 	}
 	a.monitor.ResetSessionTraffic()

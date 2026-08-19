@@ -4,6 +4,8 @@ github.com/andybalholm/brotli v1.1.0 h1:eLKJA0d02Lf0mVpIDgYnqXcUn0GqVmEFny3VuID1
 github.com/andybalholm/brotli v1.1.0/go.mod h1:sms7XGricyQI9K10gOSf56VKKWS4oLer58Q+mhRPtnY=
 github.com/antsbtw/otun-s-egress v0.0.0-20260814100220-132acd46f864 h1:tG1hTqmmDiWncyH69WcH32t1mOgF+MLsL+FOpCh7uE4=
 github.com/antsbtw/otun-s-egress v0.0.0-20260814100220-132acd46f864/go.mod h1:dljdPau1LxfnYfDD+S0kVJ/2lsujFH0mAY2SwYh57YY=
+github.com/antsbtw/otun-s-egress v0.0.0-20260819175402-a8a1275a0e41 h1:JI3wL8dpeaeS9NKSX/bo1fPzDGfF0Ken2Yx7uNUK7Z0=
+github.com/antsbtw/otun-s-egress v0.0.0-20260819175402-a8a1275a0e41/go.mod h1:dljdPau1LxfnYfDD+S0kVJ/2lsujFH0mAY2SwYh57YY=
 github.com/antsbtw/sing-quic v0.6.2-0.20260814100200-ac550fe1b63a h1:SmNzY0yRLH55dcyvYoDUxkv/LzqORuysq/ME4lkKfdY=
 github.com/antsbtw/sing-quic v0.6.2-0.20260814100200-ac550fe1b63a/go.mod h1:InZoOUntWuq6Q09IjP2Qb/dtu06TbwwXMUR6ZBJTn5E=
 github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 h1:LYSB6VgWzKtNrcxElw3c97BP40Oc7bizKxA9K1Vi/5k=

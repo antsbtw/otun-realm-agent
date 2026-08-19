@@ -2,7 +2,7 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20260814100220-132acd46f864 // pin: branch feat/punch-observer-trace
+require github.com/antsbtw/otun-s-egress v0.0.0-20260819175402-a8a1275a0e41 // pin: branch feat/punch-observer-trace
 
 require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 
