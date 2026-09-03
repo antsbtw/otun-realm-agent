@@ -888,11 +888,17 @@ func (a *Agent) sendHeartbeat() {
 // 一次共享 Registry Snapshot，喂两条通路（计费 + lifecycle/behavior），避免重复抓取。
 func (a *Agent) reportConnectionsAndObserve() {
 	connections := a.activeConnections()
+	now := time.Now().UTC()
+
+	// ★连接数归零时【不能直接 return】：LifecycleTracker 还持有上一轮的连接，
+	// 必须让它 Diff 出这些连接的 close 事件（close 才带 duration + 字节数，
+	// 正是「零字节长连接」判据的来源）。早退会让最后一批连接永远没有 close，
+	// 也就永远看不到「连上了但数据传不动」。
+	// 计费通路本就不该发空报文，故只跳过计费、继续走 obs。
 	if len(connections) == 0 {
+		a.observeConnections(nil, now)
 		return
 	}
-
-	now := time.Now().UTC()
 
 	// —— 计费通路 ——
 	report := &config.ConnectionsReport{
@@ -919,7 +925,13 @@ func (a *Agent) reportConnectionsAndObserve() {
 		a.kickUsers(resp.KickUsers)
 	}
 
-	// —— 运营平面通路（§7.4/§7.6）——
+	a.observeConnections(connections, now)
+}
+
+// observeConnections 走运营平面通路（§7.4/§7.6）。
+// 与计费通路分开成独立函数，是为了让「连接数归零」这一轮也能跑到——
+// 那一轮恰恰要产出上一批连接的 close 事件。
+func (a *Agent) observeConnections(connections []egress.ConnInfo, now time.Time) {
 	// ConnInfo.Protocol 区分协议；合成稳定 id 供 lifecycle diff。
 	obsConns := make([]obs.Conn, 0, len(connections))
 	for _, conn := range connections {
@@ -933,7 +945,7 @@ func (a *Agent) reportConnectionsAndObserve() {
 		})
 	}
 
-	// 第 2 类：连接生命周期 diff。
+	// 第 2 类：连接生命周期 diff（空输入 → Diff 产出 prev 全部的 close）。
 	if events := a.lifecycle.Diff(obsConns, now); len(events) > 0 {
 		a.obsReporter.Enqueue(obs.SchemaConnLifecycle, obs.ConnLifecyclePayload{Events: events})
 	}
