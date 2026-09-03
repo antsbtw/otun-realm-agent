@@ -182,7 +182,9 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 		selfsign:     selfsign,
 		generator:    config.NewRealmGenerator(selfsign.CertPath(), selfsign.KeyPath()),
 		billReporter: stats.NewReporter(cfg.APIURL, cfg.NodeAPIKey, statsCache),
-		obsReporter: obs.NewReporter(cfg.OBSEndpoint, obs.Identity{
+		// ★obs 与计费共用 NodeAPIKey（同一把 node token，无需另发凭证）；
+		// collector 灰度期 fail-open，老版本不带头也能上报。
+		obsReporter: obs.NewReporter(cfg.OBSEndpoint, cfg.NodeAPIKey, obs.Identity{
 			NodeID:  cfg.NodeID,
 			RealmID: cfg.RealmID,
 			Region:  cfg.Region,

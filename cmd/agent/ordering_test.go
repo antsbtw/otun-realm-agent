@@ -83,7 +83,7 @@ func newTestAgent(t *testing.T, reg *egress.Registry, nodes map[string]egress.No
 		cfg:          &config.AgentConfig{NodeID: "test", StatsInterval: 60 * time.Second},
 		cache:        config.NewCache(t.TempDir()),
 		billReporter: stats.NewReporter("http://127.0.0.1:1/unreachable", "k", cache),
-		obsReporter:  obs.NewReporter("", obs.Identity{}, t.TempDir()),
+		obsReporter:  obs.NewReporter("", "", obs.Identity{}, t.TempDir()),
 		monitor:      quota.NewMonitor(nil),
 		generator:    config.NewRealmGenerator("/nope.crt", "/nope.key"),
 		registry:     reg,
