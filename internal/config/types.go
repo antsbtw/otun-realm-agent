@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"time"
+
+	"otun-realm-agent/internal/upstream"
 )
 
 // AgentConfig 是 realm-agent 的运行配置。
@@ -30,6 +32,13 @@ type AgentConfig struct {
 
 	// 运营平面（§7.3：第二条上报通路，独立于计费）
 	OBSEndpoint string // 运营平面采集端点（私网地址），空则不上报
+
+	// 上游住宅代理出口（可选；EnvironmentFile 注入，凭据不进 unit/仓库）。
+	// 空 = 用户流量从本机 IP 直连（原行为）。非空 = 用户流量经上游 SOCKS5 出去，
+	// 上游不通即断流（fail closed），只有 UpstreamDirectDomains 显式直连。
+	UpstreamProxy         string   // socks5://user:pass@host:port
+	UpstreamDirectDomains []string // 直连域名后缀（逗号分隔），空 = 全部走上游
+	UpstreamExpectIP      string   // 自检期望出口 IP，空 = 只验可达
 }
 
 // 六协议本地 UDP 端口约定常量（总设计 §1 表 + agent 施工单 §3.2/§7）。
@@ -199,6 +208,8 @@ type NodeLoad struct {
 	ActiveConnections int     `json:"active_connections"`
 	ActiveUsers       int     `json:"active_users"`
 	UserCount         int     `json:"user_count"`
+	// Upstream 上游代理出口自检（nil = 未启用/尚未自检；fleet nodeLoad 须同步加字段才落库）。
+	Upstream *upstream.Health `json:"upstream,omitempty"`
 }
 
 // HeartbeatResponse 心跳响应。CertUpdate 对 realm-agent 忽略（§7.1.3，自签自持）。

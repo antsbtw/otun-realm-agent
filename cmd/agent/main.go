@@ -25,6 +25,7 @@ import (
 	"otun-realm-agent/internal/realm"
 	"otun-realm-agent/internal/relaymgr"
 	"otun-realm-agent/internal/stats"
+	"otun-realm-agent/internal/upstream"
 )
 
 // Agent 是 realm-agent 主控制器。固定 remote 模式（§7.7：无本地/混合）。
@@ -64,6 +65,9 @@ type Agent struct {
 	registrar *realm.Registrar
 	// ★A1b 兼职中继对账器（RELAY_FLEET_BOUNDARY_DESIGN §5bis）。
 	relayMgr                *relaymgr.Manager
+	// 上游住宅代理出口（nil = 未启用，用户流量本机直连）。注入每个协议 node 的 egress.Config.Egress。
+	upstream      *egress.UpstreamDialer
+	upstreamCheck *upstream.Checker
 	reloadCount             int                      // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
 	lastReportedReloadCount int                      // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
 	lastRendezvous          *config.RendezvousHealth // 最近一次自检快照（1c，随注册/心跳上报 fleet）
@@ -138,6 +142,9 @@ func main() {
 	if cfg.OBSEndpoint == "" {
 		log.Println("OBS_ENDPOINT not set — operational reporting runs in no-op mode (§7.3.2)")
 	}
+	if cfg.UpstreamProxy == "" {
+		log.Println("Upstream proxy: disabled (user traffic exits this node's own IP)")
+	}
 
 	agent, err := NewAgent(cfg)
 	if err != nil {
@@ -200,6 +207,21 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 		conns:        map[string]net.PacketConn{},
 	}
 
+	// 上游住宅代理：配置了却解析失败 → 拒绝启动（宁可不服务，也不能悄悄改回本机 IP 直连）。
+	if cfg.UpstreamProxy != "" {
+		d, err := egress.NewUpstreamDialer(egress.UpstreamConfig{
+			URL:           cfg.UpstreamProxy,
+			DirectDomains: cfg.UpstreamDirectDomains,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("UPSTREAM_PROXY invalid (refusing to start rather than exit directly): %w", err)
+		}
+		agent.upstream = d
+		agent.upstreamCheck = upstream.NewChecker(d, d.Server(), cfg.UpstreamExpectIP, len(d.DirectDomains()))
+		log.Printf("Upstream proxy: ENABLED via %s (fail closed; expect_ip=%q; direct_domains=%v)",
+			d.Server(), cfg.UpstreamExpectIP, d.DirectDomains())
+	}
+
 	// 限额监控器（超限/过期 → 踢人）。★踢人走共享 Registry：一次踢该用户全协议连接。
 	agent.monitor = quota.NewMonitor(func(uuid, reason string) {
 		log.Printf("User quota exceeded: %s (%s), kicking...", uuid, reason)
@@ -215,6 +237,9 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 func (a *Agent) Run(ctx context.Context) {
 	a.baseCtx = ctx
 	a.startHTTPServer()
+	if a.upstreamCheck != nil {
+		go a.upstreamCheck.Run(ctx, 60*time.Second)
+	}
 
 	// 注册（不靠 IP，靠 node_id+api_key，§5.1）。首启还没起 node，上报空协议实况。
 	if err := a.register(); err != nil {
@@ -623,6 +648,10 @@ func (a *Agent) punchTraceSink() punchtrace.Sink {
 func (a *Agent) startOneLocked(cfg egress.Config, users []egress.User) error {
 	cfg.Meter = a.registry                  // ★注入共享 Registry（C.1）
 	cfg.PunchTraceSink = a.punchTraceSink() // 接收端打洞埋点（默认 nil=关）
+	if a.upstream != nil {
+		// ★只在非 nil 时赋值：typed-nil 指针装进接口 ≠ nil，会让 node 误以为有自定义 dialer。
+		cfg.Egress = a.upstream
+	}
 
 	port := config.LocalPort(cfg.Protocol)
 	if port == 0 {
@@ -828,6 +857,14 @@ func distinctUserCount(conns []egress.ConnInfo) int {
 
 // —— 心跳 / 观测 / 计费 ——
 
+// upstreamHealth 上游代理自检快照（未启用/尚未自检 → nil，心跳不带该字段）。
+func (a *Agent) upstreamHealth() *upstream.Health {
+	if a.upstreamCheck == nil {
+		return nil
+	}
+	return a.upstreamCheck.Last()
+}
+
 // sendHeartbeat 发送心跳（计费通路）。
 func (a *Agent) sendHeartbeat() {
 	sysLoad := stats.GetSystemLoad()
@@ -849,6 +886,7 @@ func (a *Agent) sendHeartbeat() {
 			ActiveConnections: len(connections),
 			ActiveUsers:       distinctUserCount(connections),
 			UserCount:         a.monitor.GetUserCount(), // 服务名单数（≠在连），仅保留兼容
+			Upstream:          a.upstreamHealth(),
 		},
 		PublicIP:           stats.GetPublicIPv4(),     // §5.1：仅可观测
 		RendezvousHealth:   rendezvous,                // 1c：自检快照，nil=尚无（fleet 不覆盖旧值）

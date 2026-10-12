@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -44,7 +45,16 @@ func LoadFromEnv() *AgentConfig {
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 
 		OBSEndpoint: getEnv("OBS_ENDPOINT", ""), // §7.3.2：私网采集端点，空则不上报
+
+		UpstreamProxy:         getEnv("UPSTREAM_PROXY", ""),
+		UpstreamDirectDomains: splitList(getEnv("UPSTREAM_DIRECT_DOMAINS", "")),
+		UpstreamExpectIP:      getEnv("UPSTREAM_EXPECT_IP", ""),
 	}
+}
+
+// splitList 逗号/空白分隔的列表，去空项。
+func splitList(s string) []string {
+	return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' })
 }
 
 func getEnv(key, defaultVal string) string {

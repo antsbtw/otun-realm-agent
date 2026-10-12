@@ -230,6 +230,8 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$INSTALL_DIR
 $ENV_VARS
+# 可选：上游住宅代理出口（UPSTREAM_PROXY 等，含凭据，600 权限）。文件不存在 = 本机直连（原行为）。
+EnvironmentFile=-/etc/otun-realm-agent/upstream.env
 # 启动前等 DNS 真正可解析（最多 120s，超时也放行，交由 agent 自身重试兜底）。
 ExecStartPre=/bin/sh -c 'i=0; until getent hosts otun-manager-v3.situstechnologies.com >/dev/null 2>&1 || [ \$i -ge 120 ]; do i=\$((i+1)); sleep 1; done'
 ExecStart=$INSTALL_DIR/agent
