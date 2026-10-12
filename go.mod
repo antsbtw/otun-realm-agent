@@ -2,7 +2,7 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20261007001017-42fb466d8f79 // pin: branch feat/meter-source-relay-trace
+require github.com/antsbtw/otun-s-egress v0.0.0-20261012173550-88ee7c709172 // pin: branch feat/upstream-proxy
 
 require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 
