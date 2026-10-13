@@ -39,6 +39,10 @@ type AgentConfig struct {
 	UpstreamProxy         string   // socks5://user:pass@host:port
 	UpstreamDirectDomains []string // 直连域名后缀（逗号分隔），空 = 全部走上游
 	UpstreamExpectIP      string   // 自检期望出口 IP，空 = 只验可达
+
+	// 出口滥用防护（egress.GuardMode）：enforce(默认，空值同) / log(只记不拦) / off(完全关闭)。
+	// 拦内网/本机/云元数据目标、TCP 25、BT（握手/DHT/tracker/uTP）。
+	EgressGuard string
 }
 
 // 六协议本地 UDP 端口约定常量（总设计 §1 表 + agent 施工单 §3.2/§7）。

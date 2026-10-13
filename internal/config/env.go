@@ -49,6 +49,8 @@ func LoadFromEnv() *AgentConfig {
 		UpstreamProxy:         getEnv("UPSTREAM_PROXY", ""),
 		UpstreamDirectDomains: splitList(getEnv("UPSTREAM_DIRECT_DOMAINS", "")),
 		UpstreamExpectIP:      getEnv("UPSTREAM_EXPECT_IP", ""),
+
+		EgressGuard: getEnv("OTUN_EGRESS_GUARD", ""),
 	}
 }
 

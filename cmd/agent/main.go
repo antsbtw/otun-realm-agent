@@ -68,6 +68,8 @@ type Agent struct {
 	// 上游住宅代理出口（nil = 未启用，用户流量本机直连）。注入每个协议 node 的 egress.Config.Egress。
 	upstream      *egress.UpstreamDialer
 	upstreamCheck *upstream.Checker
+	// 出口滥用防护模式，注入每个协议 node 的 egress.Config.GuardMode。
+	guardMode               egress.GuardMode
 	reloadCount             int                      // 累积 rebuild 计数（§7.5 realm_health：频繁 rebuild = 出口在抖动）
 	lastReportedReloadCount int                      // 上次 realm_health 上报时的 reloadCount 基线（用于算窗口增量）
 	lastRendezvous          *config.RendezvousHealth // 最近一次自检快照（1c，随注册/心跳上报 fleet）
@@ -221,6 +223,15 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 		log.Printf("Upstream proxy: ENABLED via %s (fail closed; expect_ip=%q; direct_domains=%v)",
 			d.Server(), cfg.UpstreamExpectIP, d.DirectDomains())
 	}
+
+	// 出口滥用防护：写错不拒绝启动，按默认 enforce 跑并告警（防护本身不影响正常流量）。
+	gm, err := egress.ParseGuardMode(cfg.EgressGuard)
+	if err != nil {
+		log.Printf("Warning: OTUN_EGRESS_GUARD=%q invalid (%v); using enforce", cfg.EgressGuard, err)
+		gm = egress.GuardEnforce
+	}
+	agent.guardMode = gm
+	log.Printf("Egress guard: %s (blocks internal/metadata/self destinations, TCP/25, BitTorrent)", gm)
 
 	// 限额监控器（超限/过期 → 踢人）。★踢人走共享 Registry：一次踢该用户全协议连接。
 	agent.monitor = quota.NewMonitor(func(uuid, reason string) {
@@ -648,6 +659,7 @@ func (a *Agent) punchTraceSink() punchtrace.Sink {
 func (a *Agent) startOneLocked(cfg egress.Config, users []egress.User) error {
 	cfg.Meter = a.registry                  // ★注入共享 Registry（C.1）
 	cfg.PunchTraceSink = a.punchTraceSink() // 接收端打洞埋点（默认 nil=关）
+	cfg.GuardMode = a.guardMode             // 出口滥用防护
 	if a.upstream != nil {
 		// ★只在非 nil 时赋值：typed-nil 指针装进接口 ≠ nil，会让 node 误以为有自定义 dialer。
 		cfg.Egress = a.upstream

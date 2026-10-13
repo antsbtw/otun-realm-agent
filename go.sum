@@ -6,6 +6,8 @@ github.com/antsbtw/otun-s-egress v0.0.0-20261007001017-42fb466d8f79 h1:X7sWZEiV7
 github.com/antsbtw/otun-s-egress v0.0.0-20261007001017-42fb466d8f79/go.mod h1:YU6qI2oF55DQnRHARxnsPle5HGvjHwEho8TIoPSoNPI=
 github.com/antsbtw/otun-s-egress v0.0.0-20261012173550-88ee7c709172 h1:KlZTn22MowabHYIdkUNVHTa1Y+NQKjEFK3pZGxiduYM=
 github.com/antsbtw/otun-s-egress v0.0.0-20261012173550-88ee7c709172/go.mod h1:YU6qI2oF55DQnRHARxnsPle5HGvjHwEho8TIoPSoNPI=
+github.com/antsbtw/otun-s-egress v0.0.0-20261013233042-85256f33f211 h1:v4KXxUvJyXpx9Z1kAtVQ4nrCj0P65Gn+hFmSDQOwels=
+github.com/antsbtw/otun-s-egress v0.0.0-20261013233042-85256f33f211/go.mod h1:YU6qI2oF55DQnRHARxnsPle5HGvjHwEho8TIoPSoNPI=
 github.com/antsbtw/sing-quic v0.6.2-0.20261006190155-398b3478b3cb h1:jp3V6R5qCh16B8POe7UTyjQyfKY/OnixHY6FWOZn0H4=
 github.com/antsbtw/sing-quic v0.6.2-0.20261006190155-398b3478b3cb/go.mod h1:InZoOUntWuq6Q09IjP2Qb/dtu06TbwwXMUR6ZBJTn5E=
 github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 h1:LYSB6VgWzKtNrcxElw3c97BP40Oc7bizKxA9K1Vi/5k=
