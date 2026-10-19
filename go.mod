@@ -2,13 +2,13 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20261013234916-4c841d47934e // pin: branch feat/egress-guard
+require github.com/antsbtw/otun-s-egress v0.0.0-20261019131546-f31cb95da059 // pin: branch feat/conn-quality (= feat/egress-guard + conn-quality QUIC stats)
 
 require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 
 require (
 	github.com/andybalholm/brotli v1.1.0 // indirect
-	github.com/antsbtw/sing-quic v0.6.2-0.20261006190155-398b3478b3cb // indirect
+	github.com/antsbtw/sing-quic v0.6.2-0.20261019130356-d5325c7e3fa2 // indirect
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 // indirect
 	github.com/caddyserver/zerossl v0.1.5 // indirect
 	github.com/database64128/netx-go v0.1.1 // indirect
