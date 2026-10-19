@@ -59,6 +59,7 @@ type Agent struct {
 	obsReporter  *obs.Reporter
 	lifecycle    *obs.LifecycleTracker
 	behavior     *obs.BehaviorAggregator
+	quality      *obs.QualityAggregator // nil = conn_quality 未开启(OTUN_CONN_QUALITY≠"1")
 	probeTargets []obs.ProbeTarget
 
 	// realm 重注册（§7.9）。
@@ -199,6 +200,7 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 			Region:  cfg.Region,
 		}, obsCache),
 		lifecycle: obs.NewLifecycleTracker(),
+		quality:   newQualityAggregator(),
 		// §7.4.4：上线初期"只观测不处置"，阈值留 0（不触发 suspected_abuse）。
 		behavior:     obs.NewBehaviorAggregator(300, obs.AbuseThresholds{}, nil),
 		probeTargets: obs.DefaultProbeTargets(),
@@ -824,6 +826,16 @@ func (a *Agent) activeConnections() []egress.ConnInfo {
 	return a.registry.Snapshot()
 }
 
+// quicStats 取全协议 QUIC 连接传输计数(按连接去重)。★走共享 Registry(C.1)。
+func (a *Agent) quicStats() []egress.QUICStat {
+	a.nodeMu.Lock()
+	defer a.nodeMu.Unlock()
+	if a.registry == nil {
+		return nil
+	}
+	return a.registry.QUICStats()
+}
+
 // collectStats 取全协议 per-user 流量。★走共享 Registry 一次按 UUID 合账（C.1）。
 // reset=true 供账（清零），false 快照（观测）。铁律：两者绝不复用同一次调用（§5）。
 func (a *Agent) collectStats(reset bool) []egress.UserStat {
@@ -1001,6 +1013,43 @@ func (a *Agent) observeConnections(connections []egress.ConnInfo, now time.Time)
 	}
 	// 第 4 类：出口行为窗口累计（在 egressTicker 周期 Build 上报）。
 	a.behavior.Observe(obsConns)
+
+	a.observeQuality(connections, now)
+}
+
+// newQualityAggregator 未开启时返回 nil → observeQuality 整段跳过,零开销。
+func newQualityAggregator() *obs.QualityAggregator {
+	if !obs.ConnQualityEnabled() {
+		return nil
+	}
+	return obs.NewQualityAggregator()
+}
+
+// observeQuality conn_quality:速度/延迟/丢包/卡顿,按 user×protocol 每分钟一行上报
+// (设计稿 ops-collector/docs/CONN_EXPERIENCE_QUALITY_DESIGN.md)。只读 Registry,不碰计费。
+func (a *Agent) observeQuality(connections []egress.ConnInfo, now time.Time) {
+	if a.quality == nil {
+		return
+	}
+	conns := make([]obs.QualityConn, 0, len(connections))
+	for _, c := range connections {
+		conns = append(conns, obs.QualityConn{
+			ID: connID(c), User: c.UUID, Protocol: c.Protocol, Destination: c.Destination,
+			Upload: c.Upload, Download: c.Download, LastRead: c.LastRead, LastWrite: c.LastWrite,
+		})
+	}
+	stats := a.quicStats()
+	quic := make([]obs.QualityQUIC, 0, len(stats))
+	for _, q := range stats {
+		quic = append(quic, obs.QualityQUIC{
+			Key: q.Key, User: q.UUID, Protocol: q.Protocol,
+			CongestionControl: q.CongestionControl, BrutalRxBPS: q.BrutalRxBPS, Source: q.Source,
+			MinRTT: q.MinRTT, SmoothedRTT: q.SmoothedRTT, PacketsSent: q.PacketsSent, PacketsLost: q.PacketsLost,
+		})
+	}
+	if p := a.quality.Observe(conns, quic, now); p != nil {
+		a.obsReporter.Enqueue(obs.SchemaConnQuality, *p)
+	}
 }
 
 // connID 为 egress ConnInfo 合成一个稳定连接标识（库未暴露 conn_id）。
