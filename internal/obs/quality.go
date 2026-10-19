@@ -38,6 +38,10 @@ const (
 	BusyWindowBytes = 256 * 1024
 	// StallAfter 客户端发出数据后超过此时长没有任何下行 = 一次卡顿。
 	StallAfter = 5 * time.Second
+	// StallMinRequestBytes 最后一次下行之后客户端至少又发了这么多字节才算"发了请求"。
+	// 下载完后客户端会发 HTTP/2 WINDOW_UPDATE/PING ACK、TLS 记录等几十字节的控制包,
+	// 它们本就不需要回应;不设下限时灰度首分钟几乎每条连接都被误判卡顿(10-19 jp-01)。
+	StallMinRequestBytes = 512
 )
 
 // QualityConn 一条连接的快照(由上层从 egress.ConnInfo 整形传入)。
@@ -129,7 +133,10 @@ type QualityAggregator struct {
 	prevConn  map[string]connBytes
 	prevQUIC  map[string]quicCounters
 	stalledAt map[string]time.Time // conn → 已计过卡顿的那次 LastRead,避免跨窗口重复计
-	lastTick  time.Time
+	// upAtDown conn → 最近一次看到下行增长时该连接的累计上行。按采样粒度近似:同一窗口
+	// 里先收下行、后发新请求的情况会被并进基线而漏计(宁可少计,不误报)。
+	upAtDown map[string]int64
+	lastTick time.Time
 }
 
 // NewQualityAggregator 创建聚合器。
@@ -139,6 +146,7 @@ func NewQualityAggregator() *QualityAggregator {
 		prevConn:  map[string]connBytes{},
 		prevQUIC:  map[string]quicCounters{},
 		stalledAt: map[string]time.Time{},
+		upAtDown:  map[string]int64{},
 	}
 }
 
@@ -192,7 +200,10 @@ func (a *QualityAggregator) Observe(conns []QualityConn, quic []QualityQUIC, now
 		b.windowDown += dd
 		curConn[c.ID] = connBytes{c.Upload, c.Download}
 
-		if isStall(c, now) && !a.stalledAt[c.ID].Equal(c.LastRead) {
+		if dd > 0 {
+			a.upAtDown[c.ID] = c.Upload
+		}
+		if isStall(c, now) && c.Upload-a.upAtDown[c.ID] >= StallMinRequestBytes && !a.stalledAt[c.ID].Equal(c.LastRead) {
 			b.stalls++
 			a.stalledAt[c.ID] = c.LastRead
 		}
@@ -201,6 +212,11 @@ func (a *QualityAggregator) Observe(conns []QualityConn, quic []QualityQUIC, now
 	for id := range a.stalledAt {
 		if _, live := curConn[id]; !live {
 			delete(a.stalledAt, id)
+		}
+	}
+	for id := range a.upAtDown {
+		if _, live := curConn[id]; !live {
+			delete(a.upAtDown, id)
 		}
 	}
 

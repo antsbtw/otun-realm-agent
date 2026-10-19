@@ -89,9 +89,9 @@ func TestQualityStallCountedOnce(t *testing.T) {
 	a := NewQualityAggregator()
 	req := at(0)
 	stalled := QualityConn{ID: "c1", User: "u1", Protocol: "trojan", Destination: "img.x.com:443",
-		Upload: 500, Download: 0, LastRead: req}
+		Upload: 900, Download: 0, LastRead: req}
 	push := QualityConn{ID: "c2", User: "u1", Protocol: "trojan", Destination: "push.x.com:5223",
-		Upload: 500, LastRead: req}
+		Upload: 900, LastRead: req}
 	for _, s := range []int{1, 10, 20, 30} {
 		a.Observe([]QualityConn{stalled, push}, nil, at(s))
 	}
@@ -122,5 +122,26 @@ func TestConnQualityEnabledOnlyOne(t *testing.T) {
 		if got := ConnQualityEnabled(); got != want {
 			t.Errorf("%s=%q → %v, want %v", ConnQualityEnv, v, got, want)
 		}
+	}
+}
+
+// 下载完成后客户端只发了几十字节控制包(WINDOW_UPDATE/ACK)→ 不是卡顿;
+// 之后又发了一个真实请求(≥512B)且 5s 无回应 → 计一次。
+func TestQualityStallIgnoresSmallControlFrames(t *testing.T) {
+	a := NewQualityAggregator()
+	c := QualityConn{ID: "c1", User: "u1", Protocol: "hysteria2", Destination: "pbs.twimg.com:443",
+		Upload: 600, Download: 2 << 20, LastWrite: at(0), LastRead: at(1)}
+	a.Observe([]QualityConn{c}, nil, at(0)) // 首见:下行增长,基线上行=600
+	c.Upload = 640                          // 40 字节控制包
+	c.LastRead = at(2)
+	a.Observe([]QualityConn{c}, nil, at(10))
+	a.Observe([]QualityConn{c}, nil, at(20))
+	c.Upload = 640 + 900 // 新请求
+	c.LastRead = at(25)
+	a.Observe([]QualityConn{c}, nil, at(31))
+	a.Observe([]QualityConn{c}, nil, at(41))
+	u := a.Observe(nil, nil, at(60)).Users[0]
+	if u.StallCount != 1 {
+		t.Fatalf("stall_count=%d, want 1 (control frames ignored, real request counted once)", u.StallCount)
 	}
 }
