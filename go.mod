@@ -2,7 +2,7 @@ module otun-realm-agent
 
 go 1.25.5
 
-require github.com/antsbtw/otun-s-egress v0.0.0-20261019134349-6bb538c326d1 // pin: branch fix/quic-loss-count (= feat/conn-quality + hy2/tuic loss count)
+require github.com/antsbtw/otun-s-egress v0.0.0-20261024135134-8b241f3aed83 // pin: branch fix/udp-session-timeout (= fix/quic-loss-count + hy2/tuic UDPTimeout 5m)
 
 require github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 
