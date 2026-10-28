@@ -137,6 +137,18 @@ type QualityAggregator struct {
 	// 里先收下行、后发新请求的情况会被并进基线而漏计(宁可少计,不误报)。
 	upAtDown map[string]int64
 	lastTick time.Time
+	window   WindowStats // 最近一次 Observe 的全节点合计,供 node_capacity
+}
+
+// WindowStats 一个 10s 采样窗口里全节点的合计(所有 user×protocol 加总)。
+// node_capacity 要的是"同一窗口里所有人加起来",不能拿各用户分钟峰值相加。
+type WindowStats struct {
+	Elapsed     time.Duration
+	DownBytes   int64 // 节点发给用户
+	UpBytes     int64 // 用户发给节点
+	Conns       int
+	ActiveUsers int // 本窗口有连接的用户
+	BusyUsers   int // 本窗口下行 ≥ BusyWindowBytes 的用户(各协议合计)
 }
 
 // NewQualityAggregator 创建聚合器。
@@ -165,6 +177,8 @@ func (a *QualityAggregator) bucket(user, protocol string) *qualityBucket {
 //
 // 字节按连接求差:新出现的连接全额计入(它的字节都发生在本窗口内或首个窗口);
 // 两次采样之间开了又关的连接看不到,会少计——短连接多的场景吞吐偏低,可接受。
+// 进程刚启动的第一次采样只记基线、不计字节:那时已存在的连接累计值不属于这 10 秒。
+// 连接 id 必须唯一(含开始时间),否则并发的同 id 连接会互相当成"上一次",字节被反复全额计入。
 func (a *QualityAggregator) Observe(conns []QualityConn, quic []QualityQUIC, now time.Time) *ConnQualityPayload {
 	now = now.UTC()
 	minute := now.Truncate(time.Minute)
@@ -175,11 +189,14 @@ func (a *QualityAggregator) Observe(conns []QualityConn, quic []QualityQUIC, now
 	if a.minute.IsZero() || minute.After(a.minute) {
 		a.minute = minute
 	}
+	first := a.lastTick.IsZero()
 	elapsed := 10 * time.Second
-	if !a.lastTick.IsZero() && now.After(a.lastTick) {
+	if !first && now.After(a.lastTick) {
 		elapsed = now.Sub(a.lastTick)
 	}
 	a.lastTick = now
+	a.window = WindowStats{Elapsed: elapsed, Conns: len(conns)}
+	userDown := map[string]int64{}
 
 	for _, b := range a.buckets {
 		b.windowDown, b.windowTouch = 0, false
@@ -190,17 +207,23 @@ func (a *QualityAggregator) Observe(conns []QualityConn, quic []QualityQUIC, now
 		b := a.bucket(c.User, c.Protocol)
 		b.conns[c.ID] = struct{}{}
 		b.windowTouch = true
-		prev := a.prevConn[c.ID]
+		prev, seen := a.prevConn[c.ID]
 		du, dd := c.Upload-prev.up, c.Download-prev.down
-		if du < 0 || dd < 0 { // 同 id 换了一条新连接(id 不含时间戳),按新连接全额计
-			du, dd = c.Upload, c.Download
+		switch {
+		case first:
+			du, dd = 0, 0
+		case seen && (du < 0 || dd < 0): // 计数回退,不应发生;按 0 计,宁少勿多
+			du, dd = 0, 0
 		}
 		b.up += du
 		b.down += dd
 		b.windowDown += dd
+		a.window.DownBytes += dd
+		a.window.UpBytes += du
+		userDown[c.User] += dd
 		curConn[c.ID] = connBytes{c.Upload, c.Download}
 
-		if dd > 0 {
+		if dd > 0 || first {
 			a.upAtDown[c.ID] = c.Upload
 		}
 		if isStall(c, now) && c.Upload-a.upAtDown[c.ID] >= StallMinRequestBytes && !a.stalledAt[c.ID].Equal(c.LastRead) {
@@ -263,8 +286,17 @@ func (a *QualityAggregator) Observe(conns []QualityConn, quic []QualityQUIC, now
 			b.goodput = append(b.goodput, b.windowDown*8*int64(time.Second)/int64(elapsed)/1000)
 		}
 	}
+	a.window.ActiveUsers = len(userDown)
+	for _, d := range userDown {
+		if d >= BusyWindowBytes {
+			a.window.BusyUsers++
+		}
+	}
 	return out
 }
+
+// LastWindow 返回最近一次 Observe 的全节点合计。
+func (a *QualityAggregator) LastWindow() WindowStats { return a.window }
 
 // flush 结算当前分钟:只输出本分钟有过连接或 QUIC 样本的桶,然后清空。
 func (a *QualityAggregator) flush() *ConnQualityPayload {

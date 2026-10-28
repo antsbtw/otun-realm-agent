@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -59,13 +60,15 @@ type Agent struct {
 	obsReporter  *obs.Reporter
 	lifecycle    *obs.LifecycleTracker
 	behavior     *obs.BehaviorAggregator
-	quality      *obs.QualityAggregator // nil = conn_quality 未开启(OTUN_CONN_QUALITY≠"1")
+	quality      *obs.QualityAggregator      // nil = conn_quality 未开启(OTUN_CONN_QUALITY≠"1")
+	capacity     *obs.NodeCapacityAggregator // 与 quality 同开同关
+	nic          *obs.NICReader
 	probeTargets []obs.ProbeTarget
 
 	// realm 重注册（§7.9）。
 	registrar *realm.Registrar
 	// ★A1b 兼职中继对账器（RELAY_FLEET_BOUNDARY_DESIGN §5bis）。
-	relayMgr                *relaymgr.Manager
+	relayMgr *relaymgr.Manager
 	// 上游住宅代理出口（nil = 未启用，用户流量本机直连）。注入每个协议 node 的 egress.Config.Egress。
 	upstream      *egress.UpstreamDialer
 	upstreamCheck *upstream.Checker
@@ -201,6 +204,8 @@ func NewAgent(cfg *config.AgentConfig) (*Agent, error) {
 		}, obsCache),
 		lifecycle: obs.NewLifecycleTracker(),
 		quality:   newQualityAggregator(),
+		capacity:  newNodeCapacityAggregator(),
+		nic:       obs.NewNICReader(),
 		// §7.4.4：上线初期"只观测不处置"，阈值留 0（不触发 suspected_abuse）。
 		behavior:     obs.NewBehaviorAggregator(300, obs.AbuseThresholds{}, nil),
 		probeTargets: obs.DefaultProbeTargets(),
@@ -1025,6 +1030,14 @@ func newQualityAggregator() *obs.QualityAggregator {
 	return obs.NewQualityAggregator()
 }
 
+// newNodeCapacityAggregator node_capacity 与 conn_quality 共用开关。
+func newNodeCapacityAggregator() *obs.NodeCapacityAggregator {
+	if !obs.ConnQualityEnabled() {
+		return nil
+	}
+	return obs.NewNodeCapacityAggregator()
+}
+
 // observeQuality conn_quality:速度/延迟/丢包/卡顿,按 user×protocol 每分钟一行上报
 // (设计稿 ops-collector/docs/CONN_EXPERIENCE_QUALITY_DESIGN.md)。只读 Registry,不碰计费。
 func (a *Agent) observeQuality(connections []egress.ConnInfo, now time.Time) {
@@ -1050,12 +1063,25 @@ func (a *Agent) observeQuality(connections []egress.ConnInfo, now time.Time) {
 	if p := a.quality.Observe(conns, quic, now); p != nil {
 		a.obsReporter.Enqueue(obs.SchemaConnQuality, *p)
 	}
+	// node_capacity:同一窗口的全节点合计 + 网卡计数,每分钟一行(设计稿 §2.4.1)。
+	if a.capacity != nil {
+		if p := a.capacity.Observe(a.quality.LastWindow(), a.nic.Read(), now); p != nil {
+			a.obsReporter.Enqueue(obs.SchemaNodeCapacity, *p)
+		}
+	}
 }
 
 // connID 为 egress ConnInfo 合成一个稳定连接标识（库未暴露 conn_id）。
 // 六协议共享 Registry 后加 Protocol 维度，避免不同协议同 uuid+dst 撞 id。
+// ★末尾的 Start 纳秒不能省：hy2 同一用户的流共用一条 QUIC 连接（source 相同），
+// 并发连到同一 host:port 时前四段完全相同，conn_quality 按 id 求字节差会把大连接
+// 反复全额计入（10-28 实测多算 3–11 倍）。放在末尾，下游 split_part(conn_id,'|',3/4) 不受影响。
 func connID(c egress.ConnInfo) string {
-	return c.Protocol + "|" + c.UUID + "|" + c.Source + "|" + c.Destination
+	start := int64(0)
+	if !c.Start.IsZero() {
+		start = c.Start.UnixNano()
+	}
+	return c.Protocol + "|" + c.UUID + "|" + c.Source + "|" + c.Destination + "|" + strconv.FormatInt(start, 10)
 }
 
 // snapshotTrafficProfile 第 3 类：流量画像快照（→运营平面，§7.3.4）。
